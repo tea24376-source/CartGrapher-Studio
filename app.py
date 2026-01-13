@@ -11,7 +11,7 @@ import io
 plt.switch_backend('Agg')
 plt.rcParams['mathtext.fontset'] = 'cm'
 RADIUS_M = 0.016
-VERSION = "1.7"
+VERSION = "1.8"
 MAX_DURATION = 10.0
 
 def format_sci_latex(val):
@@ -51,6 +51,7 @@ def create_graph_image(df_sub, x_col, y_col, x_label, y_label, x_unit, y_unit, c
 
 st.set_page_config(page_title=f"CartGrapher Studio v{VERSION}", layout="wide")
 st.title(f"🚀 CartGrapher Studio ver {VERSION}")
+st.caption("高精度モード：1080p維持・自動フレーム間引き有効")
 
 st.sidebar.header("解析設定")
 mass_input = st.sidebar.number_input("台車の質量 m (kg)", value=0.100, min_value=0.001, format="%.3f", step=0.001)
@@ -68,17 +69,18 @@ if uploaded_file:
     cap_check.release()
 
     if duration > MAX_DURATION:
-        st.error(f"❌ 動画時間が長い({duration:.1f}秒)ため、解析を停止しました。10秒以内に編集してください。")
+        st.error(f"❌ 動画時間が長い({duration:.1f}秒)ため解析できません。10秒以内に編集してください。")
         st.stop()
 
     if "df" not in st.session_state or st.session_state.get("file_id") != uploaded_file.name:
-        with st.spinner("最適化解析中..."):
+        with st.spinner("1080p 高精度解析中 (30fps間引き)..."):
             cap = cv2.VideoCapture(tfile_temp.name)
             orig_fps = cap.get(cv2.CAP_PROP_FPS) or 30
             orig_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
             orig_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            
+            # リサイズは行わず、間引きのみ実行
             skip_frames = 1 if orig_fps >= 45 else 0
-            scale = 1280.0 / orig_w if orig_w > 1280 else 1.0
             
             data_log = []
             total_angle, prev_angle = 0.0, None
@@ -91,10 +93,7 @@ if uploaded_file:
                 if not ret: break
                 if skip_frames > 0 and f_idx % (skip_frames + 1) != 0:
                     f_idx += 1; continue
-                if scale != 1.0:
-                    frame = cv2.resize(frame, (int(orig_w * scale), int(orig_h * scale)))
                 
-                h, w = frame.shape[:2]
                 hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
                 mask_g = cv2.inRange(hsv, L_G[0], L_G[1])
                 con_g, _ = cv2.findContours(mask_g, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -104,8 +103,9 @@ if uploaded_file:
                     c = max(con_g, key=cv2.contourArea); M = cv2.moments(c)
                     if M["m00"] > 100: new_gx, new_gy = M["m10"]/M["m00"], M["m01"]/M["m00"]
                 
+                # 座標が飛んだ時の補正ロジック（リサイズなしの絶対座標系）
                 if not np.isnan(last_valid_gx) and not np.isnan(new_gx):
-                    if np.sqrt((new_gx - last_valid_gx)**2 + (new_gy - last_valid_gy)**2) > (60 * scale):
+                    if np.sqrt((new_gx - last_valid_gx)**2 + (new_gy - last_valid_gy)**2) > 60:
                         new_gx, new_gy = last_valid_gx, last_valid_gy
                 
                 if not np.isnan(new_gx): last_valid_gx, last_valid_gy = new_gx, new_gy
@@ -114,8 +114,8 @@ if uploaded_file:
                 gx, gy = new_gx, new_gy
                 bx, by = np.nan, np.nan
                 if not np.isnan(gx):
-                    mc = np.zeros((h, w), dtype=np.uint8)
-                    cv2.circle(mc, (int(gx), int(gy)), int(mask_size * scale), 255, -1)
+                    mc = np.zeros((orig_h, orig_w), dtype=np.uint8)
+                    cv2.circle(mc, (int(gx), int(gy)), mask_size, 255, -1)
                     mask_p = cv2.inRange(cv2.bitwise_and(hsv, hsv, mask=mc), L_P[0], L_P[1])
                     con_p, _ = cv2.findContours(mask_p, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
                     if con_p:
@@ -131,14 +131,13 @@ if uploaded_file:
                         total_angle += diff
                     prev_angle = curr_a
                 
-                data_log.append({"t": round(f_idx/orig_fps, 4), "x": total_angle*RADIUS_M, "gx": gx/scale, "gy": gy/scale, "bx": bx/scale, "by": by/scale})
+                data_log.append({"t": round(f_idx/orig_fps, 4), "x": total_angle*RADIUS_M, "gx": gx, "gy": gy, "bx": bx, "by": by})
                 f_idx += 1
 
             cap.release()
             df = pd.DataFrame(data_log).interpolate().ffill().bfill()
             if len(df) > 15:
                 df["x"] = savgol_filter(df["x"], 11, 2)
-                # dt計算をより堅牢に
                 dt = df["t"].diff().mean()
                 df["v"] = savgol_filter(df["x"].diff().fillna(0)/dt, 15, 2)
                 df["a"] = savgol_filter(df["v"].diff().fillna(0)/dt, 15, 2)
@@ -151,12 +150,9 @@ if uploaded_file:
     df = st.session_state.df
     st.divider()
 
-    # --- 時刻スライダー (測定点の時刻をリストにして選択) ---
     st.subheader("🖱️ タイムライン・プレビュー")
     time_list = df["t"].tolist()
     selected_t = st.select_slider("時刻を選択 [s]", options=time_list, value=time_list[0])
-    
-    # 選択された時刻の行を取得
     curr_row = df[df["t"] == selected_t].iloc[0]
     time_idx = df.index[df["t"] == selected_t][0]
     
@@ -173,7 +169,7 @@ if uploaded_file:
     r1c1, r1c2 = st.columns(2)
     with r1c1:
         st.image(create_graph_image(df.iloc[:time_idx+1], "t", "x", "t", "x", "s", "m", 'blue', 450, t_m, 0.0, x_m), channels="BGR")
-        st.latex(rf"x = {curr_row['x']:.3f} \, \text{{m}}") # 瞬間値表示を復旧
+        st.latex(rf"x = {curr_row['x']:.3f} \, \text{{m}}")
     with r1c2:
         st.image(create_graph_image(df.iloc[:time_idx+1], "t", "v", "t", "v", "s", "m/s", 'red', 450, t_m, v_mi, v_ma), channels="BGR")
         st.latex(rf"v = {curr_row['v']:.3f} \, \text{{m/s}}")
@@ -222,7 +218,6 @@ if uploaded_file:
                 (tw, th), _ = cv2.getTextSize(val_text, font, 0.55, 2)
                 cv2.putText(canvas, val_text, (idx*v_size + (v_size-tw)//2, v_size + 60), font, 0.55, (255,255,255), 2)
             
-            # 動画内右下の時刻表示を復旧
             t_text = f"t = {curr['t']:.2f} s"
             (ttw, tth), _ = cv2.getTextSize(t_text, font, 0.8, 2)
             cv2.putText(frame, t_text, (meta["w"] - ttw - 20, meta["h"] - 30), font, 0.8, (255,255,255), 2, cv2.LINE_AA)
@@ -237,4 +232,4 @@ if uploaded_file:
             if i % 20 == 0: p_bar.progress(min(i/len(df), 1.0))
         cap.release(); out.release()
         with open(final_path, "rb") as f:
-            st.download_button(f"🎥 v{VERSION} 保存", f, f"cart_v{VERSION}.mp4")
+            st.download_button(f"🎥 ver {VERSION} 保存", f, f"cart_v{VERSION}.mp4")
