@@ -6,16 +6,16 @@ from scipy.signal import savgol_filter
 import tempfile
 import matplotlib.pyplot as plt
 import io
+import os
 
 # --- 基本設定 ---
 plt.switch_backend('Agg')
-plt.rcParams['mathtext.fontset'] = 'cm' # 数式フォントをComputer Modernに固定
+plt.rcParams['mathtext.fontset'] = 'cm'
 RADIUS_M = 0.016
-VERSION = "2.5"
+VERSION = "2.6"
 MAX_DURATION = 10.0
 
 def format_sci_latex(val):
-    """指数表記をLaTeX形式で美しく整形"""
     try:
         if abs(val) < 1e-6 and val != 0: return "0"
         s = f"{val:.2e}"
@@ -32,8 +32,8 @@ def create_graph_image(df_sub, x_col, y_col, x_label, y_label, x_unit, y_unit, c
             ax.plot(df_sub[x_col], df_sub[y_col], color=color, linewidth=2, alpha=0.8)
             ax.scatter(df_sub[x_col].iloc[-1], df_sub[y_col].iloc[-1], color=color, s=60, edgecolors='white', zorder=5)
             if shade_range is not None and y_col == 'F':
-                t_start, t_end = shade_range
-                mask = (df_sub['t'] >= t_start) & (df_sub['t'] <= t_end)
+                t_s, t_e = shade_range
+                mask = (df_sub['t'] >= t_s) & (df_sub['t'] <= t_e)
                 ax.fill_between(df_sub[x_col], df_sub[y_col], where=mask, color=color, alpha=0.3)
         ax.set_title(f"${y_label}$ - ${x_label}$", fontsize=14, fontweight='bold')
         ax.set_xlabel(f"${x_label}$ [{x_unit}]", fontsize=11)
@@ -54,20 +54,20 @@ def create_graph_image(df_sub, x_col, y_col, x_label, y_label, x_unit, y_unit, c
 st.set_page_config(page_title=f"CartGrapher Studio v{VERSION}", layout="wide")
 st.title(f"🚀 CartGrapher Studio ver {VERSION}")
 
-# --- サイドバー設定 ---
 st.sidebar.header("解析設定")
 mass_input = st.sidebar.number_input("台車の質量 m (kg)", value=0.100, min_value=0.001, format="%.3f", step=0.001)
 mask_size = st.sidebar.slider("解析エリア半径 (px)", 50, 400, 200, 10)
 
-uploaded_file = st.file_uploader("動画をアップロード", type=["mp4", "mov"])
+uploaded_file = st.file_uploader("動画をアップロード (10秒以内)", type=["mp4", "mov"])
 
 if uploaded_file:
-    # (解析ロジックは前回同様のため中略。df作成まで完了している前提)
-    # --- 省略 ---
-    tfile_temp = tempfile.NamedTemporaryFile(delete=False)
+    # 一時保存
+    tfile_temp = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
     tfile_temp.write(uploaded_file.read())
+    tfile_temp.close()
+
     if "df" not in st.session_state or st.session_state.get("file_id") != uploaded_file.name:
-        with st.spinner("解析中..."):
+        with st.spinner("最高精度エンジンで解析中..."):
             cap = cv2.VideoCapture(tfile_temp.name)
             fps = cap.get(cv2.CAP_PROP_FPS) or 30
             w, h = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
@@ -113,7 +113,6 @@ if uploaded_file:
 
     df = st.session_state.df
     st.sidebar.markdown("---")
-    st.sidebar.subheader("📊 積分・計算用データ")
     t_max_limit = float(df["t"].max())
     t1 = st.sidebar.number_input(r"開始時刻 $t_1$ [s]", 0.0, t_max_limit, 0.0, 0.01)
     row1 = df.iloc[(df['t']-t1).abs().argsort()[:1]]
@@ -134,7 +133,6 @@ if uploaded_file:
     a_mi, a_ma = float(df["a"].min()), float(df["a"].max())
     f_mi, f_ma = float(df["F"].min()), float(df["F"].max())
 
-    # メイン表示：1つのLaTeXブロックで記述することでフォント崩れを防止
     r1c1, r1c2 = st.columns(2)
     with r1c1:
         st.image(create_graph_image(df.iloc[:time_idx+1], "t", "x", "t", "x", "s", "m", 'blue', 450, t_m, 0.0, x_m), channels="BGR")
@@ -155,10 +153,72 @@ if uploaded_file:
     df_w = df[(df["t"] >= t1) & (df["t"] <= t2)]
     if len(df_w) > 1:
         w_val = np.trapz(df_w["F"], df_w["x"])
-        # 仕事Wの表示修正：\mathrm{J}で単位を正体に
         st.latex(rf"W = {format_sci_latex(w_val)} \,\, \mathrm{{J}}")
 
-    if st.button(f"🎥 解析動画を生成"):
-        # 動画生成ロジック（ver 2.4と同様）
-        # --- 省略 ---
-        st.info("動画生成を開始します...")
+    if st.button(f"🎥 解析動画を生成して保存"):
+        meta = st.session_state.video_meta
+        # 出力ファイル設定
+        final_path = tempfile.NamedTemporaryFile(suffix='.mp4', delete=False).name
+        v_size = meta["w"] // 4
+        header_h = v_size + 100
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        
+        # グラフ設定
+        graph_configs = [
+            {"xc": "t", "yc": "x", "xl": "t", "yl": "x", "xu": "s", "yu": "m", "col": "blue", "ymn": 0.0, "ymx": x_m, "xm": t_m},
+            {"xc": "t", "yc": "v", "xl": "t", "yl": "v", "xu": "s", "yu": "m/s", "col": "red", "ymn": v_mi, "ymx": v_ma, "xm": t_m},
+            {"xc": "t", "yc": "a", "xl": "t", "yl": "a", "xu": "s", "yu": "m/s^2", "col": "green", "ymn": a_mi, "ymx": a_ma, "xm": t_m},
+            {"xc": "x", "yc": "F", "xl": "x", "yl": "F", "xu": "m", "yu": "N", "col": "purple", "ymn": f_mi, "ymx": f_ma, "xm": x_m}
+        ]
+
+        # VideoWriter準備 (mp4v or avc1)
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        out = cv2.VideoWriter(final_path, fourcc, meta["fps"], (meta["w"], meta["h"] + header_h))
+        
+        cap = cv2.VideoCapture(meta["path"])
+        p_bar = st.progress(0.0)
+        status_text = st.empty()
+        
+        for i in range(len(df)):
+            ret, frame = cap.read()
+            if not ret: break
+            
+            # キャンバス作成 (黒背景)
+            canvas = np.zeros((meta["h"] + header_h, meta["w"], 3), dtype=np.uint8)
+            curr = df.iloc[i]
+            df_s = df.iloc[:i+1]
+            
+            # 4枚のグラフを描画
+            for idx, g in enumerate(graph_configs):
+                g_img = create_graph_image(df_s, g["xc"], g["yc"], g["xl"], g["yl"], g["xu"], g["yu"], g["col"], v_size, g["xm"], g["ymn"], g["ymx"])
+                canvas[0:v_size, idx*v_size:(idx+1)*v_size] = g_img
+                # 値のテキスト
+                val_text = f"{g['yl']} = {curr[g['yc']]:>+7.3f} {g['yu']}"
+                (tw, th), _ = cv2.getTextSize(val_text, font, 0.5, 1)
+                cv2.putText(canvas, val_text, (idx*v_size + (v_size-tw)//2, v_size + 50), font, 0.5, (255,255,255), 1, cv2.LINE_AA)
+            
+            # 元の動画フレームを描画
+            t_text = f"t = {curr['t']:.2f} s"
+            cv2.putText(frame, t_text, (20, 40), font, 1.0, (255,255,255), 2, cv2.LINE_AA)
+            
+            # トラッキング点描画
+            if not np.isnan(curr['gx']):
+                cv2.circle(frame, (int(curr['gx']), int(curr['gy'])), mask_size, (255,255,0), 2)
+                cv2.circle(frame, (int(curr['gx']), int(curr['gy'])), 5, (0,255,0), -1)
+                if not np.isnan(curr['bx']):
+                    cv2.circle(frame, (int(curr['bx']), int(curr['by'])), 5, (255,0,255), -1)
+            
+            canvas[header_h:, :] = frame
+            out.write(canvas)
+            
+            if i % 10 == 0:
+                p_bar.progress(i / len(df))
+                status_text.text(f"生成中: {i}/{len(df)} フレーム")
+
+        cap.release()
+        out.release()
+        p_bar.empty()
+        status_text.success("✅ 動画生成が完了しました！")
+        
+        with open(final_path, "rb") as f:
+            st.download_button("💾 完成した動画をダウンロード", f, file_name=f"analysis_v{VERSION}.mp4")
