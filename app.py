@@ -12,8 +12,8 @@ import io
 plt.switch_backend('Agg')
 plt.rcParams['mathtext.fontset'] = 'cm'
 RADIUS_M = 0.016
-VERSION = "1.5"
-MAX_DURATION = 10.0 # 秒制限の設定
+VERSION = "1.6"
+MAX_DURATION = 10.0
 
 def format_sci_latex(val):
     try:
@@ -35,6 +35,7 @@ def create_graph_image(df_sub, x_col, y_col, x_label, y_label, x_unit, y_unit, c
                 mask = (df_sub[x_col] >= x1) & (df_sub[x_col] <= x2)
                 ax.fill_between(df_sub[x_col], df_sub[y_col], where=mask, color=color, alpha=0.3)
         ax.set_title(f"${y_label}$ - ${x_label}$", fontsize=14, fontweight='bold')
+        # 単位表示を確実に反映
         ax.set_xlabel(f"${x_label}$ [{x_unit}]", fontsize=11)
         ax.set_ylabel(f"${y_label}$ [{y_unit}]", fontsize=11)
         ax.set_xlim(0, max(float(x_max), 0.1))
@@ -52,7 +53,6 @@ def create_graph_image(df_sub, x_col, y_col, x_label, y_label, x_unit, y_unit, c
 
 st.set_page_config(page_title=f"CartGrapher Studio v{VERSION}", layout="wide")
 st.title(f"🚀 CartGrapher Studio ver {VERSION}")
-st.caption(f"教育機関用：10秒制限・自動負荷調整機能 搭載")
 
 st.sidebar.header("解析設定")
 mass_input = st.sidebar.number_input("台車の質量 m (kg)", value=0.100, min_value=0.001, format="%.3f", step=0.001)
@@ -61,7 +61,6 @@ mask_size = st.sidebar.slider("解析エリア半径 (px)", 50, 400, 200, 10)
 uploaded_file = st.file_uploader("動画をアップロード (10秒以内)", type=["mp4", "mov"])
 
 if uploaded_file:
-    # --- 10秒制限の事前チェック ---
     tfile_temp = tempfile.NamedTemporaryFile(delete=False)
     tfile_temp.write(uploaded_file.read())
     cap_check = cv2.VideoCapture(tfile_temp.name)
@@ -72,10 +71,10 @@ if uploaded_file:
 
     if duration > MAX_DURATION:
         st.error(f"❌ 動画時間が長い({duration:.1f}秒)ため、解析を停止しました。10秒以内に編集して再度アップロードしてください。")
-        st.stop() # ここで処理を中断
+        st.stop()
 
     if "df" not in st.session_state or st.session_state.get("file_id") != uploaded_file.name:
-        with st.spinner("最適化解析を実行中..."):
+        with st.spinner("最適化解析中..."):
             cap = cv2.VideoCapture(tfile_temp.name)
             orig_fps = cap.get(cv2.CAP_PROP_FPS) or 30
             orig_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -140,9 +139,6 @@ if uploaded_file:
 
             cap.release()
             df = pd.DataFrame(data_log).interpolate().ffill().bfill()
-            if len(df) > 5:
-                df["gx"] = df["gx"].rolling(window=5, center=True).mean().ffill().bfill()
-                df["gy"] = df["gy"].rolling(window=5, center=True).mean().ffill().bfill()
             if len(df) > 15:
                 df["x"] = savgol_filter(df["x"], 11, 2)
                 df["v"] = savgol_filter(df["x"].diff().fillna(0)*orig_fps/(skip_frames+1), 15, 2)
@@ -156,14 +152,11 @@ if uploaded_file:
     df = st.session_state.df
     st.divider()
 
-    # --- プレビュー ---
-    st.subheader("🖱️ タイムライン・プレビュー")
     time_idx = st.slider("時間をスキャン", 0, len(df)-1, 0)
     curr_row = df.iloc[time_idx]
     
     st.sidebar.markdown("---")
     st.sidebar.subheader("積分範囲 (F-x)")
-    # 【改善】1mm単位(0.001)で数値入力できるように変更
     x1_in = st.sidebar.number_input("開始 x1 [m]", value=float(df["x"].min()), format="%.3f", step=0.001)
     x2_in = st.sidebar.number_input("終了 x2 [m]", value=float(df["x"].max()), format="%.3f", step=0.001)
 
@@ -175,18 +168,14 @@ if uploaded_file:
     r1c1, r1c2 = st.columns(2)
     with r1c1:
         st.image(create_graph_image(df.iloc[:time_idx+1], "t", "x", "t", "x", "s", "m", 'blue', 450, t_m, 0.0, x_m), channels="BGR")
-        st.latex(rf"x = {curr_row['x']:.3f} \, \text{{m}}")
     with r1c2:
         st.image(create_graph_image(df.iloc[:time_idx+1], "t", "v", "t", "v", "s", "m/s", 'red', 450, t_m, v_mi, v_ma), channels="BGR")
-        st.latex(rf"v = {curr_row['v']:.3f} \, \text{{m/s}}")
 
     r2c1, r2c2 = st.columns(2)
     with r2c1:
         st.image(create_graph_image(df.iloc[:time_idx+1], "t", "a", "t", "a", "s", "m/s^2", 'green', 450, t_m, a_mi, a_ma), channels="BGR")
-        st.latex(rf"a = {curr_row['a']:.3f} \, \text{{m/s}}^2")
     with r2c2:
         st.image(create_graph_image(df.iloc[:time_idx+1], "x", "F", "x", "F", "m", "N", 'purple', 450, x_m, f_mi, f_ma, shade_range=(x1_in, x2_in)), channels="BGR")
-        st.latex(rf"F = {curr_row['F']:.3f} \, \text{{N}}")
 
     st.divider()
     df_w = df[(df["x"] >= x1_in) & (df["x"] <= x2_in)].sort_values("x")
@@ -197,18 +186,20 @@ if uploaded_file:
         cola.latex(rf"W = {format_sci_latex(w_val)} \, \text{{J}}")
         colb.latex(rf"\Delta K = {format_sci_latex(dk_val)} \, \text{{J}}")
 
-    # --- 動画合成 ---
-    if st.button(f"🎥 ver {VERSION} 動画生成（安定モード）"):
+    if st.button(f"🎥 ver {VERSION} 動画生成"):
         meta = st.session_state.video_meta
         final_path = tempfile.NamedTemporaryFile(suffix='.mp4', delete=False).name
         v_size, font = meta["w"] // 4, cv2.FONT_HERSHEY_SIMPLEX
         header_h = v_size + 100
+        
+        # 軸ラベルと単位の対応を定義
         graph_configs = [
-            {"xc": "t", "yc": "x", "col": "blue", "xu": "m", "sym": "x", "ymn": 0.0, "ymx": x_m, "xm": t_m},
-            {"xc": "t", "yc": "v", "col": "red", "xu": "m/s", "sym": "v", "ymn": v_mi, "ymx": v_ma, "xm": t_m},
-            {"xc": "t", "yc": "a", "col": "green", "xu": "m/s2", "sym": "a", "ymn": a_mi, "ymx": a_ma, "xm": t_m},
-            {"xc": "x", "yc": "F", "col": "purple", "xu": "N", "sym": "F", "ymn": f_mi, "ymx": f_ma, "xm": x_m}
+            {"xc": "t", "yc": "x", "xl": "t", "yl": "x", "xu": "s", "yu": "m", "col": "blue", "ymn": 0.0, "ymx": x_m, "xm": t_m},
+            {"xc": "t", "yc": "v", "xl": "t", "yl": "v", "xu": "s", "yu": "m/s", "col": "red", "ymn": v_mi, "ymx": v_ma, "xm": t_m},
+            {"xc": "t", "yc": "a", "xl": "t", "yl": "a", "xu": "s", "yu": "m/s^2", "col": "green", "ymn": a_mi, "ymx": a_ma, "xm": t_m},
+            {"xc": "x", "yc": "F", "xl": "x", "yl": "F", "xu": "m", "yu": "N", "col": "purple", "ymn": f_mi, "ymx": f_ma, "xm": x_m}
         ]
+        
         out = cv2.VideoWriter(final_path, cv2.VideoWriter_fourcc(*'mp4v'), meta["fps"], (meta["w"], meta["h"] + header_h))
         cap = cv2.VideoCapture(meta["path"])
         p_bar = st.progress(0.0)
@@ -218,19 +209,20 @@ if uploaded_file:
             if not ret: break
             canvas = np.zeros((meta["h"] + header_h, meta["w"], 3), dtype=np.uint8)
             curr = df.iloc[i]; df_s = df.iloc[:i+1]
+            
             for idx, g in enumerate(graph_configs):
-                g_img = create_graph_image(df_s, g["xc"], g["yc"], g["xc"], g["yc"], "", "", g["col"], v_size, g["xm"], g["ymn"], g["ymx"], shade_range=None)
+                # 単位(xu, yu)を渡してグラフ描画
+                g_img = create_graph_image(df_s, g["xc"], g["yc"], g["xl"], g["yl"], g["xu"], g["yu"], g["col"], v_size, g["xm"], g["ymn"], g["ymx"])
                 canvas[0:v_size, idx*v_size:(idx+1)*v_size] = g_img
-                val_text = f"{g['sym']} = {curr[g['yc']]:>+7.3f} {g['xu']}"
+                val_text = f"{g['yl']} = {curr[g['yc']]:>+7.3f} {g['yu']}"
                 (tw, th), _ = cv2.getTextSize(val_text, font, 0.55, 2)
                 cv2.putText(canvas, val_text, (idx*v_size + (v_size-tw)//2, v_size + 60), font, 0.55, (255,255,255), 2)
+            
             if not np.isnan(curr['gx']):
                 cv2.circle(frame, (int(curr['gx']), int(curr['gy'])), mask_size, (255,255,0), 2)
                 cv2.circle(frame, (int(curr['gx']), int(curr['gy'])), 5, (0,255,0), -1)
                 if not np.isnan(curr['bx']): cv2.circle(frame, (int(curr['bx']), int(curr['by'])), 5, (255,0,255), -1)
-            t_text = f"t = {curr['t']:.2f} s"
-            (ttw, tth), _ = cv2.getTextSize(t_text, font, 0.8, 2)
-            cv2.putText(frame, t_text, (meta["w"] - ttw - 20, meta["h"] - 30), font, 0.8, (255,255,255), 2, cv2.LINE_AA)
+            
             canvas[header_h:, :] = frame
             out.write(canvas)
             if i % 20 == 0: p_bar.progress(min(i/len(df), 1.0))
