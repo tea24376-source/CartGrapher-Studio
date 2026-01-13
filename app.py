@@ -12,7 +12,8 @@ import io
 plt.switch_backend('Agg')
 plt.rcParams['mathtext.fontset'] = 'cm'
 RADIUS_M = 0.016
-VERSION = "1.4"
+VERSION = "1.5"
+MAX_DURATION = 10.0 # 秒制限の設定
 
 def format_sci_latex(val):
     try:
@@ -51,33 +52,37 @@ def create_graph_image(df_sub, x_col, y_col, x_label, y_label, x_unit, y_unit, c
 
 st.set_page_config(page_title=f"CartGrapher Studio v{VERSION}", layout="wide")
 st.title(f"🚀 CartGrapher Studio ver {VERSION}")
-st.caption("授業用最適化モード：高負荷動画の自動間引き・リサイズ有効")
+st.caption(f"教育機関用：10秒制限・自動負荷調整機能 搭載")
 
 st.sidebar.header("解析設定")
-mass_input = st.sidebar.number_input("台車の質量 m (kg)", value=0.100, min_value=0.001, format="%.3f")
+mass_input = st.sidebar.number_input("台車の質量 m (kg)", value=0.100, min_value=0.001, format="%.3f", step=0.001)
 mask_size = st.sidebar.slider("解析エリア半径 (px)", 50, 400, 200, 10)
 
-uploaded_file = st.file_uploader("動画をアップロード (1080p/60fps対応)", type=["mp4", "mov"])
+uploaded_file = st.file_uploader("動画をアップロード (10秒以内)", type=["mp4", "mov"])
 
 if uploaded_file:
+    # --- 10秒制限の事前チェック ---
+    tfile_temp = tempfile.NamedTemporaryFile(delete=False)
+    tfile_temp.write(uploaded_file.read())
+    cap_check = cv2.VideoCapture(tfile_temp.name)
+    fps_check = cap_check.get(cv2.CAP_PROP_FPS) or 30
+    frame_count = cap_check.get(cv2.CAP_PROP_FRAME_COUNT)
+    duration = frame_count / fps_check
+    cap_check.release()
+
+    if duration > MAX_DURATION:
+        st.error(f"❌ 動画時間が長い({duration:.1f}秒)ため、解析を停止しました。10秒以内に編集して再度アップロードしてください。")
+        st.stop() # ここで処理を中断
+
     if "df" not in st.session_state or st.session_state.get("file_id") != uploaded_file.name:
-        with st.spinner("動画を最適化しながら解析中..."):
-            tfile = tempfile.NamedTemporaryFile(delete=False)
-            tfile.write(uploaded_file.read())
-            cap = cv2.VideoCapture(tfile.name)
-            
+        with st.spinner("最適化解析を実行中..."):
+            cap = cv2.VideoCapture(tfile_temp.name)
             orig_fps = cap.get(cv2.CAP_PROP_FPS) or 30
             orig_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
             orig_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
             
-            # --- 自動最適化判定 ---
-            skip_frames = 1 if orig_fps >= 45 else 0  # 60fpsなら1つ飛ばし(実質30fps)
-            calc_fps = orig_fps / (skip_frames + 1)
-            
-            # 解析用の解像度（負荷軽減のため上限720p程度に制限）
-            scale = 1.0
-            if orig_w > 1280:
-                scale = 1280.0 / orig_w
+            skip_frames = 1 if orig_fps >= 45 else 0
+            scale = 1280.0 / orig_w if orig_w > 1280 else 1.0
             
             data_log = []
             total_angle, prev_angle = 0.0, None
@@ -88,13 +93,8 @@ if uploaded_file:
             while True:
                 ret, frame = cap.read()
                 if not ret: break
-                
-                # フレーム間引き
                 if skip_frames > 0 and f_idx % (skip_frames + 1) != 0:
-                    f_idx += 1
-                    continue
-                
-                # リサイズ
+                    f_idx += 1; continue
                 if scale != 1.0:
                     frame = cv2.resize(frame, (int(orig_w * scale), int(orig_h * scale)))
                 
@@ -114,8 +114,8 @@ if uploaded_file:
                 
                 if not np.isnan(new_gx): last_valid_gx, last_valid_gy = new_gx, new_gy
                 else: new_gx, new_gy = last_valid_gx, last_valid_gy
+                
                 gx, gy = new_gx, new_gy
-
                 bx, by = np.nan, np.nan
                 if not np.isnan(gx):
                     mc = np.zeros((h, w), dtype=np.uint8)
@@ -135,7 +135,6 @@ if uploaded_file:
                         total_angle += diff
                     prev_angle = curr_a
                 
-                # 時間 t は元のインデックスとFPSから正確に算出
                 data_log.append({"t": f_idx/orig_fps, "x": total_angle*RADIUS_M, "gx": gx/scale, "gy": gy/scale, "bx": bx/scale, "by": by/scale})
                 f_idx += 1
 
@@ -144,14 +143,14 @@ if uploaded_file:
             if len(df) > 5:
                 df["gx"] = df["gx"].rolling(window=5, center=True).mean().ffill().bfill()
                 df["gy"] = df["gy"].rolling(window=5, center=True).mean().ffill().bfill()
-            if len(df) > 15: # 間引いた分、フィルタ窓を調整
+            if len(df) > 15:
                 df["x"] = savgol_filter(df["x"], 11, 2)
                 df["v"] = savgol_filter(df["x"].diff().fillna(0)*orig_fps/(skip_frames+1), 15, 2)
                 df["a"] = savgol_filter(df["v"].diff().fillna(0)*orig_fps/(skip_frames+1), 15, 2)
                 df["F"] = mass_input * df["a"]
             
             st.session_state.df = df
-            st.session_state.video_meta = {"fps": orig_fps, "w": orig_w, "h": orig_h, "path": tfile.name, "skip": skip_frames}
+            st.session_state.video_meta = {"fps": orig_fps, "w": orig_w, "h": orig_h, "path": tfile_temp.name, "skip": skip_frames}
             st.session_state.file_id = uploaded_file.name
 
     df = st.session_state.df
@@ -164,8 +163,9 @@ if uploaded_file:
     
     st.sidebar.markdown("---")
     st.sidebar.subheader("積分範囲 (F-x)")
-    x1_in = st.sidebar.number_input("開始 x1 [m]", value=float(df["x"].min()))
-    x2_in = st.sidebar.number_input("終了 x2 [m]", value=float(df["x"].max()))
+    # 【改善】1mm単位(0.001)で数値入力できるように変更
+    x1_in = st.sidebar.number_input("開始 x1 [m]", value=float(df["x"].min()), format="%.3f", step=0.001)
+    x2_in = st.sidebar.number_input("終了 x2 [m]", value=float(df["x"].max()), format="%.3f", step=0.001)
 
     t_m, x_m = float(df["t"].max()), float(df["x"].max())
     v_mi, v_ma = float(df["v"].min()), float(df["v"].max())
@@ -198,7 +198,7 @@ if uploaded_file:
         colb.latex(rf"\Delta K = {format_sci_latex(dk_val)} \, \text{{J}}")
 
     # --- 動画合成 ---
-    if st.button(f"🎥 ver {VERSION} 動画を生成"):
+    if st.button(f"🎥 ver {VERSION} 動画生成（安定モード）"):
         meta = st.session_state.video_meta
         final_path = tempfile.NamedTemporaryFile(suffix='.mp4', delete=False).name
         v_size, font = meta["w"] // 4, cv2.FONT_HERSHEY_SIMPLEX
@@ -213,13 +213,9 @@ if uploaded_file:
         cap = cv2.VideoCapture(meta["path"])
         p_bar = st.progress(0.0)
         
-        # 動画合成時は元の全フレームを読み込むが、データは解析済みのものを使用
         for i in range(len(df)):
-            # 解析時に飛ばした分、動画読み込みも進める
-            for _ in range(meta["skip"] + 1):
-                ret, frame = cap.read()
+            for _ in range(meta["skip"] + 1): ret, frame = cap.read()
             if not ret: break
-            
             canvas = np.zeros((meta["h"] + header_h, meta["w"], 3), dtype=np.uint8)
             curr = df.iloc[i]; df_s = df.iloc[:i+1]
             for idx, g in enumerate(graph_configs):
@@ -228,12 +224,10 @@ if uploaded_file:
                 val_text = f"{g['sym']} = {curr[g['yc']]:>+7.3f} {g['xu']}"
                 (tw, th), _ = cv2.getTextSize(val_text, font, 0.55, 2)
                 cv2.putText(canvas, val_text, (idx*v_size + (v_size-tw)//2, v_size + 60), font, 0.55, (255,255,255), 2)
-            
             if not np.isnan(curr['gx']):
                 cv2.circle(frame, (int(curr['gx']), int(curr['gy'])), mask_size, (255,255,0), 2)
                 cv2.circle(frame, (int(curr['gx']), int(curr['gy'])), 5, (0,255,0), -1)
                 if not np.isnan(curr['bx']): cv2.circle(frame, (int(curr['bx']), int(curr['by'])), 5, (255,0,255), -1)
-            
             t_text = f"t = {curr['t']:.2f} s"
             (ttw, tth), _ = cv2.getTextSize(t_text, font, 0.8, 2)
             cv2.putText(frame, t_text, (meta["w"] - ttw - 20, meta["h"] - 30), font, 0.8, (255,255,255), 2, cv2.LINE_AA)
@@ -242,4 +236,4 @@ if uploaded_file:
             if i % 20 == 0: p_bar.progress(min(i/len(df), 1.0))
         cap.release(); out.release()
         with open(final_path, "rb") as f:
-            st.download_button(f"🎥 v{VERSION} 高速解析版を保存", f, f"cart_v{VERSION}_optimized.mp4")
+            st.download_button(f"🎥 v{VERSION} 動画を保存", f, f"cart_v{VERSION}.mp4")
