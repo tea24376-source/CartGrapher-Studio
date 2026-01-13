@@ -12,6 +12,7 @@ import io
 plt.switch_backend('Agg')
 plt.rcParams['mathtext.fontset'] = 'cm'
 RADIUS_M = 0.016  # 1.6cm固定
+VERSION = "1.1"
 
 def format_sci_latex(val):
     try:
@@ -23,20 +24,16 @@ def format_sci_latex(val):
     except:
         return "0"
 
-# --- グラフ描画関数 ---
 def create_graph_image(df_sub, x_col, y_col, x_label, y_label, x_unit, y_unit, color, size, x_max, y_min, y_max, shade_range=None):
     fig, ax = plt.subplots(figsize=(size/100, size/100), dpi=100)
     try:
         if not df_sub.empty:
             ax.plot(df_sub[x_col], df_sub[y_col], color=color, linewidth=2, alpha=0.8)
             ax.scatter(df_sub[x_col].iloc[-1], df_sub[y_col].iloc[-1], color=color, s=60, edgecolors='white', zorder=5)
-            
-            # 指定された場合のみ塗りつぶし（ブラウザ用）
             if shade_range is not None and y_col == 'F':
                 x1, x2 = shade_range
                 mask = (df_sub[x_col] >= x1) & (df_sub[x_col] <= x2)
                 ax.fill_between(df_sub[x_col], df_sub[y_col], where=mask, color=color, alpha=0.3)
-        
         ax.set_title(f"${y_label}$ - ${x_label}$", fontsize=14, fontweight='bold')
         ax.set_xlabel(f"${x_label}$ [{x_unit}]", fontsize=11)
         ax.set_ylabel(f"${y_label}$ [{y_unit}]", fontsize=11)
@@ -53,18 +50,18 @@ def create_graph_image(df_sub, x_col, y_col, x_label, y_label, x_unit, y_unit, c
     plt.close(fig)
     return cv2.resize(img, (size, size)) if img is not None else np.zeros((size, size, 3), dtype=np.uint8)
 
-st.set_page_config(page_title="Kinema-Cart Studio", layout="wide")
-st.title("🚀 CartGrapher Studio")
+st.set_page_config(page_title=f"CartGrapher Studio v{VERSION}", layout="wide")
+st.title(f"🚀 CartGrapher Studio ver {VERSION}")
 
-st.sidebar.header("解析設定")
+st.sidebar.header("解析設定 (Shape Track)")
 mass_input = st.sidebar.number_input("台車の質量 m (kg)", value=0.100, min_value=0.001, format="%.3f")
-mask_size = st.sidebar.slider("解析エリア半径 (px)", 50, 400, 200, 10)
+mask_radius_px = st.sidebar.slider("解析エリア半径 (px)", 50, 400, 200, 10)
 
 uploaded_file = st.file_uploader("動画をアップロード", type=["mp4", "mov"])
 
 if uploaded_file:
     if "df" not in st.session_state or st.session_state.get("file_id") != uploaded_file.name:
-        with st.spinner("映像を解析中..."):
+        with st.spinner("円形検出アルゴリズムで作動中..."):
             tfile = tempfile.NamedTemporaryFile(delete=False)
             tfile.write(uploaded_file.read())
             cap = cv2.VideoCapture(tfile.name)
@@ -74,26 +71,47 @@ if uploaded_file:
             
             data_log = []
             total_angle, prev_angle = 0.0, None
-            gx, gy = np.nan, np.nan
-            L_G, L_P = (np.array([35,50,50]), np.array([85,255,255])), (np.array([140,40,40]), np.array([180,255,255]))
+            last_gx, last_gy = np.nan, np.nan
+            L_P = (np.array([140,40,40]), np.array([180,255,255])) # ピンク追跡用
 
             for f_idx in range(total):
                 ret, frame = cap.read()
                 if not ret: break
-                hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-                mask_g = cv2.inRange(hsv, L_G[0], L_G[1])
-                con_g, _ = cv2.findContours(mask_g, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-                if con_g:
-                    c = max(con_g, key=cv2.contourArea); M = cv2.moments(c)
-                    if M["m00"]!=0: gx, gy = M["m10"]/M["m00"], M["m01"]/M["m00"]
+                
+                # --- 円形検出（ハフ変換） ---
+                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                gray = cv2.medianBlur(gray, 5)
+                # 白いリムを検出するためのパラメータ調整
+                circles = cv2.HoughCircles(gray, cv2.HOUGH_GRADIENT, dp=1, minDist=w//4,
+                                          param1=100, param2=30, minRadius=20, maxRadius=200)
+                
+                gx, gy = np.nan, np.nan
+                if circles is not None:
+                    circles = np.uint16(np.around(circles))
+                    # 最も「円らしい」ものを採用
+                    gx, gy, gr = circles[0, 0]
+                    # ジャンプ防止：前フレームから離れすぎていたら無視（ノイズ対策）
+                    if not np.isnan(last_gx):
+                        dist = np.sqrt((gx-last_gx)**2 + (gy-last_gy)**2)
+                        if dist > 50: # 50px以上飛んだらノイズとみなす
+                            gx, gy = last_gx, last_gy
+                    last_gx, last_gy = gx, gy
+                else:
+                    gx, gy = last_gx, last_gy # 見失った場合は前フレームを維持
+
+                # --- ピンクの追跡点（解析エリア内） ---
                 bx, by = np.nan, np.nan
                 if not np.isnan(gx):
-                    mc = np.zeros((h, w), dtype=np.uint8); cv2.circle(mc, (int(gx), int(gy)), mask_size, 255, -1)
-                    mask_p = cv2.inRange(cv2.bitwise_and(hsv, hsv, mask=mc), L_P[0], L_P[1])
+                    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+                    mask = np.zeros((h, w), dtype=np.uint8)
+                    cv2.circle(mask, (int(gx), int(gy)), mask_radius_px, 255, -1)
+                    mask_p = cv2.inRange(cv2.bitwise_and(hsv, hsv, mask=mask), L_P[0], L_P[1])
                     con_p, _ = cv2.findContours(mask_p, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
                     if con_p:
-                        cp = max(con_p, key=cv2.contourArea); Mp = cv2.moments(cp)
+                        cp = max(con_p, key=cv2.contourArea)
+                        Mp = cv2.moments(cp)
                         if Mp["m00"]!=0: bx, by = Mp["m10"]/Mp["m00"], Mp["m01"]/Mp["m00"]
+
                 if not np.isnan(gx) and not np.isnan(bx):
                     curr_a = np.arctan2(by - gy, bx - gx)
                     if prev_angle is not None:
@@ -146,7 +164,6 @@ if uploaded_file:
         st.image(create_graph_image(df.iloc[:time_idx+1], "t", "a", "t", "a", "s", "m/s^2", 'green', 450, t_m, a_mi, a_ma), channels="BGR")
         st.latex(rf"a = {curr_row['a']:.3f} \, \text{{m/s}}^2")
     with r2c2:
-        # ブラウザ上は積分範囲に色をつける
         st.image(create_graph_image(df.iloc[:time_idx+1], "x", "F", "x", "F", "m", "N", 'purple', 450, x_m, f_mi, f_ma, shade_range=(x1_in, x2_in)), channels="BGR")
         st.latex(rf"F = {curr_row['F']:.3f} \, \text{{N}}")
 
@@ -167,18 +184,11 @@ if uploaded_file:
         header_h = v_size + 100
         font = cv2.FONT_HERSHEY_SIMPLEX
         
-        t_limit = float(df["t"].max())
-        x_limit = float(df["x"].max())
-        v_min, v_max = float(df["v"].min()), float(df["v"].max())
-        a_min, a_max = float(df["a"].min()), float(df["a"].max())
-        f_min, f_max = float(df["F"].min()), float(df["F"].max())
-
-        # 動画用の設定（shade_rangeは常にNone）
         graph_configs = [
-            {"xc": "t", "yc": "x", "col": "blue", "xu": "m", "sym": "x", "ymn": 0.0, "ymx": x_limit, "xm": t_limit},
-            {"xc": "t", "yc": "v", "col": "red", "xu": "m/s", "sym": "v", "ymn": v_min, "ymx": v_max, "xm": t_limit},
-            {"xc": "t", "yc": "a", "col": "green", "xu": "m/s2", "sym": "a", "ymn": a_min, "ymx": a_max, "xm": t_limit},
-            {"xc": "x", "yc": "F", "col": "purple", "xu": "N", "sym": "F", "ymn": f_min, "ymx": f_max, "xm": x_limit}
+            {"xc": "t", "yc": "x", "col": "blue", "xu": "m", "sym": "x", "ymn": 0.0, "ymx": x_m, "xm": t_m},
+            {"xc": "t", "yc": "v", "col": "red", "xu": "m/s", "sym": "v", "ymn": v_mi, "ymx": v_ma, "xm": t_m},
+            {"xc": "t", "yc": "a", "col": "green", "xu": "m/s2", "sym": "a", "ymn": a_mi, "ymx": a_ma, "xm": t_m},
+            {"xc": "x", "yc": "F", "col": "purple", "xu": "N", "sym": "F", "ymn": f_mi, "ymx": f_ma, "xm": x_m}
         ]
 
         out = cv2.VideoWriter(final_path, cv2.VideoWriter_fourcc(*'mp4v'), meta["fps"], (meta["w"], meta["h"] + header_h))
@@ -193,24 +203,19 @@ if uploaded_file:
             df_s = df.iloc[:i+1]
             
             for idx, g in enumerate(graph_configs):
-                # 動画内F-xグラフは積分色付けなし
                 g_img = create_graph_image(df_s, g["xc"], g["yc"], g["xc"], g["yc"], "", "", g["col"], v_size, g["xm"], g["ymn"], g["ymx"], shade_range=None)
                 canvas[0:v_size, idx*v_size:(idx+1)*v_size] = g_img
-                
-                # 瞬間値描画 (x = +0.123 m の形式)
                 val_text = f"{g['sym']} = {curr[g['yc']]:>+7.3f} {g['xu']}"
                 (tw, th), _ = cv2.getTextSize(val_text, font, 0.55, 2)
                 tx = idx*v_size + (v_size - tw)//2
                 cv2.putText(canvas, val_text, (tx, v_size + 60), font, 0.55, (255,255,255), 2)
 
-            # 解析エリア（円）と時刻 t の表示
             if not np.isnan(curr['gx']):
-                cv2.circle(frame, (int(curr['gx']), int(curr['gy'])), mask_size, (255,255,0), 2)
+                cv2.circle(frame, (int(curr['gx']), int(curr['gy'])), mask_radius_px, (255,255,0), 2)
                 cv2.circle(frame, (int(curr['gx']), int(curr['gy'])), 5, (0,255,0), -1)
                 if not np.isnan(curr['bx']):
                     cv2.circle(frame, (int(curr['bx']), int(curr['by'])), 5, (255,0,255), -1)
             
-            # 時刻 t = 〇.〇〇 s を右下に表示
             t_text = f"t = {curr['t']:.2f} s"
             (ttw, tth), _ = cv2.getTextSize(t_text, font, 0.8, 2)
             cv2.putText(frame, t_text, (meta["w"] - ttw - 20, meta["h"] - 30), font, 0.8, (255,255,255), 2, cv2.LINE_AA)
@@ -221,4 +226,4 @@ if uploaded_file:
             
         cap.release(); out.release()
         with open(final_path, "rb") as f:
-            st.download_button("🎥 完成動画を保存", f, "cart_analysis_final.mp4")
+            st.download_button(f"🎥 v{VERSION} 動画を保存", f, f"cart_v{VERSION}.mp4")
