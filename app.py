@@ -11,7 +11,7 @@ import io
 plt.switch_backend('Agg')
 plt.rcParams['mathtext.fontset'] = 'cm'
 RADIUS_M = 0.016
-VERSION = "2.2"
+VERSION = "2.3"
 MAX_DURATION = 10.0
 
 def format_sci_latex(val):
@@ -69,11 +69,11 @@ if uploaded_file:
     cap_check.release()
 
     if duration > MAX_DURATION:
-        st.error(f"❌ 動画時間が長すぎます。10秒以内に編集してください。")
+        st.error(f"❌ 動画時間が長すぎます。")
         st.stop()
 
     if "df" not in st.session_state or st.session_state.get("file_id") != uploaded_file.name:
-        with st.spinner("最高精度エンジンで解析中..."):
+        with st.spinner("解析中..."):
             cap = cv2.VideoCapture(tfile_temp.name)
             fps = cap.get(cv2.CAP_PROP_FPS) or 30
             w, h = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
@@ -130,30 +130,27 @@ if uploaded_file:
     df = st.session_state.df
     st.divider()
 
-    # --- サイドバー：指定時刻のデータ表示 ---
+    # --- サイドバー：データ表示 ---
     st.sidebar.markdown("---")
     st.sidebar.subheader("📊 積分・計算用データ")
     t_max_limit = float(df["t"].max())
     
-    # 開始時刻セクション
-    t1 = st.sidebar.number_input("開始時刻 t1 [s]", 0.0, t_max_limit, 0.0, 0.01)
+    # t1
+    t1 = st.sidebar.number_input(r"開始時刻 $t_1$ [s]", 0.0, t_max_limit, 0.0, 0.01)
     row1 = df.iloc[(df['t']-t1).abs().argsort()[:1]]
     st.sidebar.markdown(f"- $x_1$: `{row1['x'].values[0]:.3f}` m")
     st.sidebar.markdown(f"- $v_1$: `{row1['v'].values[0]:.3f}` m/s")
-    
     st.sidebar.markdown("---")
-    
-    # 終了時刻セクション
-    t2 = st.sidebar.number_input("終了時刻 t2 [s]", 0.0, t_max_limit, t_max_limit, 0.01)
+    # t2
+    t2 = st.sidebar.number_input(r"終了時刻 $t_2$ [s]", 0.0, t_max_limit, t_max_limit, 0.01)
     row2 = df.iloc[(df['t']-t2).abs().argsort()[:1]]
     st.sidebar.markdown(f"- $x_2$: `{row2['x'].values[0]:.3f}` m")
     st.sidebar.markdown(f"- $v_2$: `{row2['v'].values[0]:.3f}` m/s")
 
-    # メイン画面：グラフプレビュー
+    # メイン：グラフ
     time_list = [round(t, 4) for t in df["t"].tolist()]
     selected_t = st.select_slider("時刻をスキャン [s]", options=time_list, value=time_list[0])
-    time_idx = time_list.index(selected_t)
-    curr_row = df.iloc[time_idx]
+    time_idx = time_list.index(selected_t); curr_row = df.iloc[time_idx]
 
     t_m, x_m = float(df["t"].max()), float(df["x"].max())
     v_mi, v_ma = float(df["v"].min()), float(df["v"].max())
@@ -163,34 +160,31 @@ if uploaded_file:
     r1c1, r1c2 = st.columns(2)
     with r1c1:
         st.image(create_graph_image(df.iloc[:time_idx+1], "t", "x", "t", "x", "s", "m", 'blue', 450, t_m, 0.0, x_m), channels="BGR")
-        st.latex(rf"x = {curr_row['x']:.3f} \, \text{{m}}")
+        st.markdown(f"<div style='text-align: center;'>$x = {curr_row['x']:.3f} \, \\text{{m}}$</div>", unsafe_allow_html=True)
     with r1c2:
         st.image(create_graph_image(df.iloc[:time_idx+1], "t", "v", "t", "v", "s", "m/s", 'red', 450, t_m, v_mi, v_ma), channels="BGR")
-        st.latex(rf"v = {curr_row['v']:.3f} \, \text{{m/s}}")
+        st.markdown(f"<div style='text-align: center;'>$v = {curr_row['v']:.3f} \, \\text{{m/s}}$</div>", unsafe_allow_html=True)
 
     r2c1, r2c2 = st.columns(2)
     with r2c1:
         st.image(create_graph_image(df.iloc[:time_idx+1], "t", "a", "t", "a", "s", "m/s^2", 'green', 450, t_m, a_mi, a_ma), channels="BGR")
-        st.latex(rf"a = {curr_row['a']:.3f} \, \text{{m/s}}^2")
+        st.markdown(f"<div style='text-align: center;'>$a = {curr_row['a']:.3f} \, \\text{{m/s}}^2$</div>", unsafe_allow_html=True)
     with r2c2:
         st.image(create_graph_image(df.iloc[:time_idx+1], "x", "F", "x", "F", "m", "N", 'purple', 450, x_m, f_mi, f_ma, shade_range=(t1, t2)), channels="BGR")
-        st.latex(rf"F = {curr_row['F']:.3f} \, \text{{N}}")
+        st.markdown(f"<div style='text-align: center;'>$F = {curr_row['F']:.3f} \, \\text{{N}}$</div>", unsafe_allow_html=True)
 
     st.divider()
     
-    # 仕事の計算結果のみ表示
+    # 仕事の計算
     df_w = df[(df["t"] >= t1) & (df["t"] <= t2)]
     if len(df_w) > 1:
         w_val = np.trapz(df_w["F"], df_w["x"])
-        st.latex(rf"W = \int_{{x_1}}^{{x_2}} F dx = {format_sci_latex(w_val)} \, \text{{J}}")
-        st.info("💡 $v_1, v_2$ から運動エネルギーの変化 $\Delta K$ を計算し、仕事 $W$ と比較してみよう。")
+        st.markdown(f"<div style='text-align: center; font-size: 1.5em;'>$W = {format_sci_latex(w_val)} \, \\text{{J}}$</div>", unsafe_allow_html=True)
 
-    # --- 動画生成機能の復活 ---
-    if st.button(f"🎥 ver {VERSION} 解析動画を生成"):
-        meta = st.session_state.video_meta
-        final_path = tempfile.NamedTemporaryFile(suffix='.mp4', delete=False).name
-        v_size, font = meta["w"] // 4, cv2.FONT_HERSHEY_SIMPLEX
-        header_h = v_size + 100
+    # 動画生成
+    if st.button(f"🎥 解析動画を生成"):
+        meta = st.session_state.video_meta; final_path = tempfile.NamedTemporaryFile(suffix='.mp4', delete=False).name
+        v_size, font = meta["w"] // 4, cv2.FONT_HERSHEY_SIMPLEX; header_h = v_size + 100
         graph_configs = [
             {"xc": "t", "yc": "x", "xl": "t", "yl": "x", "xu": "s", "yu": "m", "col": "blue", "ymn": 0.0, "ymx": x_m, "xm": t_m},
             {"xc": "t", "yc": "v", "xl": "t", "yl": "v", "xu": "s", "yu": "m/s", "col": "red", "ymn": v_mi, "ymx": v_ma, "xm": t_m},
@@ -198,9 +192,7 @@ if uploaded_file:
             {"xc": "x", "yc": "F", "xl": "x", "yl": "F", "xu": "m", "yu": "N", "col": "purple", "ymn": f_mi, "ymx": f_ma, "xm": x_m}
         ]
         out = cv2.VideoWriter(final_path, cv2.VideoWriter_fourcc(*'mp4v'), meta["fps"], (meta["w"], meta["h"] + header_h))
-        cap = cv2.VideoCapture(meta["path"])
-        p_bar = st.progress(0.0)
-        
+        cap = cv2.VideoCapture(meta["path"]); p_bar = st.progress(0.0)
         for i in range(len(df)):
             ret, frame = cap.read()
             if not ret: break
@@ -210,11 +202,8 @@ if uploaded_file:
                 g_img = create_graph_image(df_s, g["xc"], g["yc"], g["xl"], g["yl"], g["xu"], g["yu"], g["col"], v_size, g["xm"], g["ymn"], g["ymx"])
                 canvas[0:v_size, idx*v_size:(idx+1)*v_size] = g_img
                 val_text = f"{g['yl']} = {curr[g['yc']]:>+7.3f} {g['yu']}"
-                (tw, th), _ = cv2.getTextSize(val_text, font, 0.55, 2)
-                cv2.putText(canvas, val_text, (idx*v_size + (v_size-tw)//2, v_size + 60), font, 0.55, (255,255,255), 2)
-            
-            t_text = f"t = {curr['t']:.2f} s"
-            (ttw, tth), _ = cv2.getTextSize(t_text, font, 0.8, 2)
+                (tw, th), _ = cv2.getTextSize(val_text, font, 0.55, 2); cv2.putText(canvas, val_text, (idx*v_size + (v_size-tw)//2, v_size + 60), font, 0.55, (255,255,255), 2)
+            t_text = f"t = {curr['t']:.2f} s"; (ttw, tth), _ = cv2.getTextSize(t_text, font, 0.8, 2)
             cv2.putText(frame, t_text, (meta["w"] - ttw - 20, meta["h"] - 30), font, 0.8, (255,255,255), 2, cv2.LINE_AA)
             if not np.isnan(curr['gx']):
                 cv2.circle(frame, (int(curr['gx']), int(curr['gy'])), mask_size, (255,255,0), 2)
@@ -224,5 +213,4 @@ if uploaded_file:
             out.write(canvas)
             if i % 20 == 0: p_bar.progress(min(i/len(df), 1.0))
         cap.release(); out.release()
-        with open(final_path, "rb") as f:
-            st.download_button(f"🎥 解析動画を保存", f, f"cart_analysis_v{VERSION}.mp4")
+        with open(final_path, "rb") as f: st.download_button(f"🎥 解析動画を保存", f, f"cart_analysis_v{VERSION}.mp4")
