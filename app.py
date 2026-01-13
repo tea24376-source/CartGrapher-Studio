@@ -11,8 +11,8 @@ import io
 # --- 基本設定 ---
 plt.switch_backend('Agg')
 plt.rcParams['mathtext.fontset'] = 'cm'
-RADIUS_M = 0.016  # 1.6cm固定
-VERSION = "1.3"
+RADIUS_M = 0.016
+VERSION = "1.4"
 
 def format_sci_latex(val):
     try:
@@ -21,8 +21,7 @@ def format_sci_latex(val):
         base, exp = s.split('e')
         exp_int = int(exp)
         return rf"{base} \times 10^{{{exp_int}}}"
-    except:
-        return "0"
+    except: return "0"
 
 def create_graph_image(df_sub, x_col, y_col, x_label, y_label, x_unit, y_unit, color, size, x_max, y_min, y_max, shade_range=None):
     fig, ax = plt.subplots(figsize=(size/100, size/100), dpi=100)
@@ -52,54 +51,81 @@ def create_graph_image(df_sub, x_col, y_col, x_label, y_label, x_unit, y_unit, c
 
 st.set_page_config(page_title=f"CartGrapher Studio v{VERSION}", layout="wide")
 st.title(f"🚀 CartGrapher Studio ver {VERSION}")
+st.caption("授業用最適化モード：高負荷動画の自動間引き・リサイズ有効")
 
 st.sidebar.header("解析設定")
 mass_input = st.sidebar.number_input("台車の質量 m (kg)", value=0.100, min_value=0.001, format="%.3f")
 mask_size = st.sidebar.slider("解析エリア半径 (px)", 50, 400, 200, 10)
 
-uploaded_file = st.file_uploader("動画をアップロード", type=["mp4", "mov"])
+uploaded_file = st.file_uploader("動画をアップロード (1080p/60fps対応)", type=["mp4", "mov"])
 
 if uploaded_file:
     if "df" not in st.session_state or st.session_state.get("file_id") != uploaded_file.name:
-        with st.spinner("座標安定化処理を実行中..."):
+        with st.spinner("動画を最適化しながら解析中..."):
             tfile = tempfile.NamedTemporaryFile(delete=False)
             tfile.write(uploaded_file.read())
             cap = cv2.VideoCapture(tfile.name)
-            fps = cap.get(cv2.CAP_PROP_FPS) or 30
-            w, h = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-            total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            
+            orig_fps = cap.get(cv2.CAP_PROP_FPS) or 30
+            orig_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            orig_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            
+            # --- 自動最適化判定 ---
+            skip_frames = 1 if orig_fps >= 45 else 0  # 60fpsなら1つ飛ばし(実質30fps)
+            calc_fps = orig_fps / (skip_frames + 1)
+            
+            # 解析用の解像度（負荷軽減のため上限720p程度に制限）
+            scale = 1.0
+            if orig_w > 1280:
+                scale = 1280.0 / orig_w
             
             data_log = []
             total_angle, prev_angle = 0.0, None
             last_valid_gx, last_valid_gy = np.nan, np.nan
-            L_G = (np.array([35,50,50]), np.array([85,255,255]))
-            L_P = (np.array([140,40,40]), np.array([180,255,255]))
+            L_G, L_P = (np.array([35,50,50]), np.array([85,255,255])), (np.array([140,40,40]), np.array([180,255,255]))
 
-            for f_idx in range(total):
+            f_idx = 0
+            while True:
                 ret, frame = cap.read()
                 if not ret: break
+                
+                # フレーム間引き
+                if skip_frames > 0 and f_idx % (skip_frames + 1) != 0:
+                    f_idx += 1
+                    continue
+                
+                # リサイズ
+                if scale != 1.0:
+                    frame = cv2.resize(frame, (int(orig_w * scale), int(orig_h * scale)))
+                
+                h, w = frame.shape[:2]
                 hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
                 mask_g = cv2.inRange(hsv, L_G[0], L_G[1])
                 con_g, _ = cv2.findContours(mask_g, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                
                 new_gx, new_gy = np.nan, np.nan
                 if con_g:
                     c = max(con_g, key=cv2.contourArea); M = cv2.moments(c)
                     if M["m00"] > 100: new_gx, new_gy = M["m10"]/M["m00"], M["m01"]/M["m00"]
+                
                 if not np.isnan(last_valid_gx) and not np.isnan(new_gx):
-                    if np.sqrt((new_gx - last_valid_gx)**2 + (new_gy - last_valid_gy)**2) > 60:
+                    if np.sqrt((new_gx - last_valid_gx)**2 + (new_gy - last_valid_gy)**2) > (60 * scale):
                         new_gx, new_gy = last_valid_gx, last_valid_gy
+                
                 if not np.isnan(new_gx): last_valid_gx, last_valid_gy = new_gx, new_gy
                 else: new_gx, new_gy = last_valid_gx, last_valid_gy
                 gx, gy = new_gx, new_gy
 
                 bx, by = np.nan, np.nan
                 if not np.isnan(gx):
-                    mc = np.zeros((h, w), dtype=np.uint8); cv2.circle(mc, (int(gx), int(gy)), mask_size, 255, -1)
+                    mc = np.zeros((h, w), dtype=np.uint8)
+                    cv2.circle(mc, (int(gx), int(gy)), int(mask_size * scale), 255, -1)
                     mask_p = cv2.inRange(cv2.bitwise_and(hsv, hsv, mask=mc), L_P[0], L_P[1])
                     con_p, _ = cv2.findContours(mask_p, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
                     if con_p:
                         cp = max(con_p, key=cv2.contourArea); Mp = cv2.moments(cp)
                         if Mp["m00"]!=0: bx, by = Mp["m10"]/Mp["m00"], Mp["m01"]/Mp["m00"]
+
                 if not np.isnan(gx) and not np.isnan(bx):
                     curr_a = np.arctan2(by - gy, bx - gx)
                     if prev_angle is not None:
@@ -108,25 +134,30 @@ if uploaded_file:
                         elif diff < -np.pi: diff += 2*np.pi
                         total_angle += diff
                     prev_angle = curr_a
-                data_log.append({"t": f_idx/fps, "x": total_angle*RADIUS_M, "gx": gx, "gy": gy, "bx": bx, "by": by})
+                
+                # 時間 t は元のインデックスとFPSから正確に算出
+                data_log.append({"t": f_idx/orig_fps, "x": total_angle*RADIUS_M, "gx": gx/scale, "gy": gy/scale, "bx": bx/scale, "by": by/scale})
+                f_idx += 1
+
             cap.release()
             df = pd.DataFrame(data_log).interpolate().ffill().bfill()
             if len(df) > 5:
                 df["gx"] = df["gx"].rolling(window=5, center=True).mean().ffill().bfill()
                 df["gy"] = df["gy"].rolling(window=5, center=True).mean().ffill().bfill()
-            if len(df) > 31:
-                df["x"] = savgol_filter(df["x"], 15, 2)
-                df["v"] = savgol_filter(df["x"].diff().fillna(0)*fps, 31, 2)
-                df["a"] = savgol_filter(df["v"].diff().fillna(0)*fps, 31, 2)
+            if len(df) > 15: # 間引いた分、フィルタ窓を調整
+                df["x"] = savgol_filter(df["x"], 11, 2)
+                df["v"] = savgol_filter(df["x"].diff().fillna(0)*orig_fps/(skip_frames+1), 15, 2)
+                df["a"] = savgol_filter(df["v"].diff().fillna(0)*orig_fps/(skip_frames+1), 15, 2)
                 df["F"] = mass_input * df["a"]
+            
             st.session_state.df = df
-            st.session_state.video_meta = {"fps": fps, "w": w, "h": h, "path": tfile.name}
+            st.session_state.video_meta = {"fps": orig_fps, "w": orig_w, "h": orig_h, "path": tfile.name, "skip": skip_frames}
             st.session_state.file_id = uploaded_file.name
 
     df = st.session_state.df
     st.divider()
 
-    # --- プレビュー表示 (ver 1.0形式) ---
+    # --- プレビュー ---
     st.subheader("🖱️ タイムライン・プレビュー")
     time_idx = st.slider("時間をスキャン", 0, len(df)-1, 0)
     curr_row = df.iloc[time_idx]
@@ -163,7 +194,6 @@ if uploaded_file:
         w_val = np.trapz(df_w["F"], df_w["x"])
         dk_val = 0.5 * mass_input * (df_w["v"].iloc[-1]**2 - df_w["v"].iloc[0]**2)
         cola, colb = st.columns(2)
-        # ver 1.0と同じく、計算式を省き値のみを表示
         cola.latex(rf"W = {format_sci_latex(w_val)} \, \text{{J}}")
         colb.latex(rf"\Delta K = {format_sci_latex(dk_val)} \, \text{{J}}")
 
@@ -182,9 +212,14 @@ if uploaded_file:
         out = cv2.VideoWriter(final_path, cv2.VideoWriter_fourcc(*'mp4v'), meta["fps"], (meta["w"], meta["h"] + header_h))
         cap = cv2.VideoCapture(meta["path"])
         p_bar = st.progress(0.0)
+        
+        # 動画合成時は元の全フレームを読み込むが、データは解析済みのものを使用
         for i in range(len(df)):
-            ret, frame = cap.read()
+            # 解析時に飛ばした分、動画読み込みも進める
+            for _ in range(meta["skip"] + 1):
+                ret, frame = cap.read()
             if not ret: break
+            
             canvas = np.zeros((meta["h"] + header_h, meta["w"], 3), dtype=np.uint8)
             curr = df.iloc[i]; df_s = df.iloc[:i+1]
             for idx, g in enumerate(graph_configs):
@@ -193,16 +228,18 @@ if uploaded_file:
                 val_text = f"{g['sym']} = {curr[g['yc']]:>+7.3f} {g['xu']}"
                 (tw, th), _ = cv2.getTextSize(val_text, font, 0.55, 2)
                 cv2.putText(canvas, val_text, (idx*v_size + (v_size-tw)//2, v_size + 60), font, 0.55, (255,255,255), 2)
+            
             if not np.isnan(curr['gx']):
                 cv2.circle(frame, (int(curr['gx']), int(curr['gy'])), mask_size, (255,255,0), 2)
                 cv2.circle(frame, (int(curr['gx']), int(curr['gy'])), 5, (0,255,0), -1)
                 if not np.isnan(curr['bx']): cv2.circle(frame, (int(curr['bx']), int(curr['by'])), 5, (255,0,255), -1)
+            
             t_text = f"t = {curr['t']:.2f} s"
             (ttw, tth), _ = cv2.getTextSize(t_text, font, 0.8, 2)
             cv2.putText(frame, t_text, (meta["w"] - ttw - 20, meta["h"] - 30), font, 0.8, (255,255,255), 2, cv2.LINE_AA)
             canvas[header_h:, :] = frame
             out.write(canvas)
-            if i % 30 == 0: p_bar.progress(min(i/len(df), 1.0))
+            if i % 20 == 0: p_bar.progress(min(i/len(df), 1.0))
         cap.release(); out.release()
         with open(final_path, "rb") as f:
-            st.download_button(f"🎥 v{VERSION} 保存", f, f"cart_v{VERSION}.mp4")
+            st.download_button(f"🎥 v{VERSION} 高速解析版を保存", f, f"cart_v{VERSION}_optimized.mp4")
