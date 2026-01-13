@@ -12,7 +12,7 @@ import io
 plt.switch_backend('Agg')
 plt.rcParams['mathtext.fontset'] = 'cm'
 RADIUS_M = 0.016  # 1.6cm固定
-VERSION = "1.2"
+VERSION = "1.3"
 
 def format_sci_latex(val):
     try:
@@ -61,7 +61,7 @@ uploaded_file = st.file_uploader("動画をアップロード", type=["mp4", "mo
 
 if uploaded_file:
     if "df" not in st.session_state or st.session_state.get("file_id") != uploaded_file.name:
-        with st.spinner("物理エンジンの安定化と計算を実行中..."):
+        with st.spinner("座標安定化処理を実行中..."):
             tfile = tempfile.NamedTemporaryFile(delete=False)
             tfile.write(uploaded_file.read())
             cap = cv2.VideoCapture(tfile.name)
@@ -72,7 +72,6 @@ if uploaded_file:
             data_log = []
             total_angle, prev_angle = 0.0, None
             last_valid_gx, last_valid_gy = np.nan, np.nan
-            
             L_G = (np.array([35,50,50]), np.array([85,255,255]))
             L_P = (np.array([140,40,40]), np.array([180,255,255]))
 
@@ -80,40 +79,27 @@ if uploaded_file:
                 ret, frame = cap.read()
                 if not ret: break
                 hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-                
                 mask_g = cv2.inRange(hsv, L_G[0], L_G[1])
                 con_g, _ = cv2.findContours(mask_g, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-                
                 new_gx, new_gy = np.nan, np.nan
                 if con_g:
-                    c = max(con_g, key=cv2.contourArea)
-                    M = cv2.moments(c)
-                    if M["m00"] > 100:
-                        new_gx, new_gy = M["m10"]/M["m00"], M["m01"]/M["m00"]
-                
-                # スムージングロジック (ver 1.1から継続)
+                    c = max(con_g, key=cv2.contourArea); M = cv2.moments(c)
+                    if M["m00"] > 100: new_gx, new_gy = M["m10"]/M["m00"], M["m01"]/M["m00"]
                 if not np.isnan(last_valid_gx) and not np.isnan(new_gx):
                     if np.sqrt((new_gx - last_valid_gx)**2 + (new_gy - last_valid_gy)**2) > 60:
                         new_gx, new_gy = last_valid_gx, last_valid_gy
-                
-                if not np.isnan(new_gx):
-                    last_valid_gx, last_valid_gy = new_gx, new_gy
-                else:
-                    new_gx, new_gy = last_valid_gx, last_valid_gy
-
+                if not np.isnan(new_gx): last_valid_gx, last_valid_gy = new_gx, new_gy
+                else: new_gx, new_gy = last_valid_gx, last_valid_gy
                 gx, gy = new_gx, new_gy
 
                 bx, by = np.nan, np.nan
                 if not np.isnan(gx):
-                    mc = np.zeros((h, w), dtype=np.uint8)
-                    cv2.circle(mc, (int(gx), int(gy)), mask_size, 255, -1)
+                    mc = np.zeros((h, w), dtype=np.uint8); cv2.circle(mc, (int(gx), int(gy)), mask_size, 255, -1)
                     mask_p = cv2.inRange(cv2.bitwise_and(hsv, hsv, mask=mc), L_P[0], L_P[1])
                     con_p, _ = cv2.findContours(mask_p, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
                     if con_p:
-                        cp = max(con_p, key=cv2.contourArea)
-                        Mp = cv2.moments(cp)
+                        cp = max(con_p, key=cv2.contourArea); Mp = cv2.moments(cp)
                         if Mp["m00"]!=0: bx, by = Mp["m10"]/Mp["m00"], Mp["m01"]/Mp["m00"]
-
                 if not np.isnan(gx) and not np.isnan(bx):
                     curr_a = np.arctan2(by - gy, bx - gx)
                     if prev_angle is not None:
@@ -123,14 +109,11 @@ if uploaded_file:
                         total_angle += diff
                     prev_angle = curr_a
                 data_log.append({"t": f_idx/fps, "x": total_angle*RADIUS_M, "gx": gx, "gy": gy, "bx": bx, "by": by})
-            
             cap.release()
             df = pd.DataFrame(data_log).interpolate().ffill().bfill()
-            
             if len(df) > 5:
-                df["gx"] = df["gx"].rolling(window=5, center=True).mean().fillna(method='bfill').fillna(method='ffill')
-                df["gy"] = df["gy"].rolling(window=5, center=True).mean().fillna(method='bfill').fillna(method='ffill')
-
+                df["gx"] = df["gx"].rolling(window=5, center=True).mean().ffill().bfill()
+                df["gy"] = df["gy"].rolling(window=5, center=True).mean().ffill().bfill()
             if len(df) > 31:
                 df["x"] = savgol_filter(df["x"], 15, 2)
                 df["v"] = savgol_filter(df["x"].diff().fillna(0)*fps, 31, 2)
@@ -143,7 +126,7 @@ if uploaded_file:
     df = st.session_state.df
     st.divider()
 
-    # --- ブラウザ プレビュー ---
+    # --- プレビュー表示 (ver 1.0形式) ---
     st.subheader("🖱️ タイムライン・プレビュー")
     time_idx = st.slider("時間をスキャン", 0, len(df)-1, 0)
     curr_row = df.iloc[time_idx]
@@ -174,72 +157,52 @@ if uploaded_file:
         st.image(create_graph_image(df.iloc[:time_idx+1], "x", "F", "x", "F", "m", "N", 'purple', 450, x_m, f_mi, f_ma, shade_range=(x1_in, x2_in)), channels="BGR")
         st.latex(rf"F = {curr_row['F']:.3f} \, \text{{N}}")
 
-    # --- 【復旧】仕事とエネルギーの計算・表示セクション ---
     st.divider()
-    st.subheader("⚖️ 仕事とエネルギーの比較")
     df_w = df[(df["x"] >= x1_in) & (df["x"] <= x2_in)].sort_values("x")
     if len(df_w) > 1:
-        # 台車がした仕事 W = ∫ F dx
         w_val = np.trapz(df_w["F"], df_w["x"])
-        # 運動エネルギー変化 ΔK = 1/2 m (v2^2 - v1^2)
         dk_val = 0.5 * mass_input * (df_w["v"].iloc[-1]**2 - df_w["v"].iloc[0]**2)
-        
         cola, colb = st.columns(2)
-        with cola:
-            st.info("仕事 (積分値)")
-            st.latex(rf"W = \int_{{x_1}}^{{x_2}} F \, dx = {format_sci_latex(w_val)} \, \text{{J}}")
-        with colb:
-            st.success("運動エネルギーの変化")
-            st.latex(rf"\Delta K = \frac{{1}}{{2}}m v_2^2 - \frac{{1}}{{2}}m v_1^2 = {format_sci_latex(dk_val)} \, \text{{J}}")
+        # ver 1.0と同じく、計算式を省き値のみを表示
+        cola.latex(rf"W = {format_sci_latex(w_val)} \, \text{{J}}")
+        colb.latex(rf"\Delta K = {format_sci_latex(dk_val)} \, \text{{J}}")
 
-    # --- 解析動画合成 ---
-    st.divider()
+    # --- 動画合成 ---
     if st.button(f"🎥 ver {VERSION} 動画を生成"):
         meta = st.session_state.video_meta
         final_path = tempfile.NamedTemporaryFile(suffix='.mp4', delete=False).name
-        v_size = meta["w"] // 4
+        v_size, font = meta["w"] // 4, cv2.FONT_HERSHEY_SIMPLEX
         header_h = v_size + 100
-        font = cv2.FONT_HERSHEY_SIMPLEX
-        
         graph_configs = [
             {"xc": "t", "yc": "x", "col": "blue", "xu": "m", "sym": "x", "ymn": 0.0, "ymx": x_m, "xm": t_m},
             {"xc": "t", "yc": "v", "col": "red", "xu": "m/s", "sym": "v", "ymn": v_mi, "ymx": v_ma, "xm": t_m},
             {"xc": "t", "yc": "a", "col": "green", "xu": "m/s2", "sym": "a", "ymn": a_mi, "ymx": a_ma, "xm": t_m},
             {"xc": "x", "yc": "F", "col": "purple", "xu": "N", "sym": "F", "ymn": f_mi, "ymx": f_ma, "xm": x_m}
         ]
-
         out = cv2.VideoWriter(final_path, cv2.VideoWriter_fourcc(*'mp4v'), meta["fps"], (meta["w"], meta["h"] + header_h))
         cap = cv2.VideoCapture(meta["path"])
         p_bar = st.progress(0.0)
-
         for i in range(len(df)):
             ret, frame = cap.read()
             if not ret: break
             canvas = np.zeros((meta["h"] + header_h, meta["w"], 3), dtype=np.uint8)
             curr = df.iloc[i]; df_s = df.iloc[:i+1]
-            
             for idx, g in enumerate(graph_configs):
                 g_img = create_graph_image(df_s, g["xc"], g["yc"], g["xc"], g["yc"], "", "", g["col"], v_size, g["xm"], g["ymn"], g["ymx"], shade_range=None)
                 canvas[0:v_size, idx*v_size:(idx+1)*v_size] = g_img
                 val_text = f"{g['sym']} = {curr[g['yc']]:>+7.3f} {g['xu']}"
                 (tw, th), _ = cv2.getTextSize(val_text, font, 0.55, 2)
-                tx = idx*v_size + (v_size - tw)//2
-                cv2.putText(canvas, val_text, (tx, v_size + 60), font, 0.55, (255,255,255), 2)
-
+                cv2.putText(canvas, val_text, (idx*v_size + (v_size-tw)//2, v_size + 60), font, 0.55, (255,255,255), 2)
             if not np.isnan(curr['gx']):
                 cv2.circle(frame, (int(curr['gx']), int(curr['gy'])), mask_size, (255,255,0), 2)
                 cv2.circle(frame, (int(curr['gx']), int(curr['gy'])), 5, (0,255,0), -1)
-                if not np.isnan(curr['bx']):
-                    cv2.circle(frame, (int(curr['bx']), int(curr['by'])), 5, (255,0,255), -1)
-            
+                if not np.isnan(curr['bx']): cv2.circle(frame, (int(curr['bx']), int(curr['by'])), 5, (255,0,255), -1)
             t_text = f"t = {curr['t']:.2f} s"
             (ttw, tth), _ = cv2.getTextSize(t_text, font, 0.8, 2)
             cv2.putText(frame, t_text, (meta["w"] - ttw - 20, meta["h"] - 30), font, 0.8, (255,255,255), 2, cv2.LINE_AA)
-            
             canvas[header_h:, :] = frame
             out.write(canvas)
             if i % 30 == 0: p_bar.progress(min(i/len(df), 1.0))
-            
         cap.release(); out.release()
         with open(final_path, "rb") as f:
-            st.download_button(f"🎥 v{VERSION} 物理解析動画を保存", f, f"cart_v{VERSION}.mp4")
+            st.download_button(f"🎥 v{VERSION} 保存", f, f"cart_v{VERSION}.mp4")
