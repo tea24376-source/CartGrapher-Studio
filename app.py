@@ -12,7 +12,7 @@ import io
 plt.switch_backend('Agg')
 plt.rcParams['mathtext.fontset'] = 'cm'
 RADIUS_M = 0.016  # 1.6cm固定
-VERSION = "1.1"
+VERSION = "1.2"
 
 def format_sci_latex(val):
     try:
@@ -61,7 +61,7 @@ uploaded_file = st.file_uploader("動画をアップロード", type=["mp4", "mo
 
 if uploaded_file:
     if "df" not in st.session_state or st.session_state.get("file_id") != uploaded_file.name:
-        with st.spinner("スムージング・フィルタ適用中..."):
+        with st.spinner("物理エンジンの安定化と計算を実行中..."):
             tfile = tempfile.NamedTemporaryFile(delete=False)
             tfile.write(uploaded_file.read())
             cap = cv2.VideoCapture(tfile.name)
@@ -71,7 +71,6 @@ if uploaded_file:
             
             data_log = []
             total_angle, prev_angle = 0.0, None
-            gx, gy = np.nan, np.nan
             last_valid_gx, last_valid_gy = np.nan, np.nan
             
             L_G = (np.array([35,50,50]), np.array([85,255,255]))
@@ -82,7 +81,6 @@ if uploaded_file:
                 if not ret: break
                 hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
                 
-                # --- 緑の重心（中心点）の検出 ---
                 mask_g = cv2.inRange(hsv, L_G[0], L_G[1])
                 con_g, _ = cv2.findContours(mask_g, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
                 
@@ -90,23 +88,21 @@ if uploaded_file:
                 if con_g:
                     c = max(con_g, key=cv2.contourArea)
                     M = cv2.moments(c)
-                    if M["m00"] > 100: # ある程度の大きさがある場合のみ採用
+                    if M["m00"] > 100:
                         new_gx, new_gy = M["m10"]/M["m00"], M["m01"]/M["m00"]
                 
-                # ジャンプ・リジェクション（急激な移動の抑制）
+                # スムージングロジック (ver 1.1から継続)
                 if not np.isnan(last_valid_gx) and not np.isnan(new_gx):
-                    dist = np.sqrt((new_gx - last_valid_gx)**2 + (new_gy - last_valid_gy)**2)
-                    if dist > 60: # 60px以上の移動はノイズとみなして無視
+                    if np.sqrt((new_gx - last_valid_gx)**2 + (new_gy - last_valid_gy)**2) > 60:
                         new_gx, new_gy = last_valid_gx, last_valid_gy
                 
                 if not np.isnan(new_gx):
                     last_valid_gx, last_valid_gy = new_gx, new_gy
                 else:
-                    new_gx, new_gy = last_valid_gx, last_valid_gy # 見失った場合は保持
+                    new_gx, new_gy = last_valid_gx, last_valid_gy
 
                 gx, gy = new_gx, new_gy
 
-                # --- ピンクの追跡点 ---
                 bx, by = np.nan, np.nan
                 if not np.isnan(gx):
                     mc = np.zeros((h, w), dtype=np.uint8)
@@ -131,7 +127,6 @@ if uploaded_file:
             cap.release()
             df = pd.DataFrame(data_log).interpolate().ffill().bfill()
             
-            # 座標データの移動平均スムージング（震え対策）
             if len(df) > 5:
                 df["gx"] = df["gx"].rolling(window=5, center=True).mean().fillna(method='bfill').fillna(method='ffill')
                 df["gy"] = df["gy"].rolling(window=5, center=True).mean().fillna(method='bfill').fillna(method='ffill')
@@ -179,7 +174,26 @@ if uploaded_file:
         st.image(create_graph_image(df.iloc[:time_idx+1], "x", "F", "x", "F", "m", "N", 'purple', 450, x_m, f_mi, f_ma, shade_range=(x1_in, x2_in)), channels="BGR")
         st.latex(rf"F = {curr_row['F']:.3f} \, \text{{N}}")
 
+    # --- 【復旧】仕事とエネルギーの計算・表示セクション ---
+    st.divider()
+    st.subheader("⚖️ 仕事とエネルギーの比較")
+    df_w = df[(df["x"] >= x1_in) & (df["x"] <= x2_in)].sort_values("x")
+    if len(df_w) > 1:
+        # 台車がした仕事 W = ∫ F dx
+        w_val = np.trapz(df_w["F"], df_w["x"])
+        # 運動エネルギー変化 ΔK = 1/2 m (v2^2 - v1^2)
+        dk_val = 0.5 * mass_input * (df_w["v"].iloc[-1]**2 - df_w["v"].iloc[0]**2)
+        
+        cola, colb = st.columns(2)
+        with cola:
+            st.info("仕事 (積分値)")
+            st.latex(rf"W = \int_{{x_1}}^{{x_2}} F \, dx = {format_sci_latex(w_val)} \, \text{{J}}")
+        with colb:
+            st.success("運動エネルギーの変化")
+            st.latex(rf"\Delta K = \frac{{1}}{{2}}m v_2^2 - \frac{{1}}{{2}}m v_1^2 = {format_sci_latex(dk_val)} \, \text{{J}}")
+
     # --- 解析動画合成 ---
+    st.divider()
     if st.button(f"🎥 ver {VERSION} 動画を生成"):
         meta = st.session_state.video_meta
         final_path = tempfile.NamedTemporaryFile(suffix='.mp4', delete=False).name
@@ -202,8 +216,7 @@ if uploaded_file:
             ret, frame = cap.read()
             if not ret: break
             canvas = np.zeros((meta["h"] + header_h, meta["w"], 3), dtype=np.uint8)
-            curr = df.iloc[i]
-            df_s = df.iloc[:i+1]
+            curr = df.iloc[i]; df_s = df.iloc[:i+1]
             
             for idx, g in enumerate(graph_configs):
                 g_img = create_graph_image(df_s, g["xc"], g["yc"], g["xc"], g["yc"], "", "", g["col"], v_size, g["xm"], g["ymn"], g["ymx"], shade_range=None)
@@ -229,4 +242,4 @@ if uploaded_file:
             
         cap.release(); out.release()
         with open(final_path, "rb") as f:
-            st.download_button(f"🎥 v{VERSION} (Smooth) 保存", f, f"cart_v{VERSION}_smooth.mp4")
+            st.download_button(f"🎥 v{VERSION} 物理解析動画を保存", f, f"cart_v{VERSION}.mp4")
