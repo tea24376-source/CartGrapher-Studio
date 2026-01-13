@@ -53,15 +53,15 @@ def create_graph_image(df_sub, x_col, y_col, x_label, y_label, x_unit, y_unit, c
 st.set_page_config(page_title=f"CartGrapher Studio v{VERSION}", layout="wide")
 st.title(f"🚀 CartGrapher Studio ver {VERSION}")
 
-st.sidebar.header("解析設定 (Shape Track)")
+st.sidebar.header("解析設定")
 mass_input = st.sidebar.number_input("台車の質量 m (kg)", value=0.100, min_value=0.001, format="%.3f")
-mask_radius_px = st.sidebar.slider("解析エリア半径 (px)", 50, 400, 200, 10)
+mask_size = st.sidebar.slider("解析エリア半径 (px)", 50, 400, 200, 10)
 
 uploaded_file = st.file_uploader("動画をアップロード", type=["mp4", "mov"])
 
 if uploaded_file:
     if "df" not in st.session_state or st.session_state.get("file_id") != uploaded_file.name:
-        with st.spinner("円形検出アルゴリズムで作動中..."):
+        with st.spinner("スムージング・フィルタ適用中..."):
             tfile = tempfile.NamedTemporaryFile(delete=False)
             tfile.write(uploaded_file.read())
             cap = cv2.VideoCapture(tfile.name)
@@ -71,41 +71,47 @@ if uploaded_file:
             
             data_log = []
             total_angle, prev_angle = 0.0, None
-            last_gx, last_gy = np.nan, np.nan
-            L_P = (np.array([140,40,40]), np.array([180,255,255])) # ピンク追跡用
+            gx, gy = np.nan, np.nan
+            last_valid_gx, last_valid_gy = np.nan, np.nan
+            
+            L_G = (np.array([35,50,50]), np.array([85,255,255]))
+            L_P = (np.array([140,40,40]), np.array([180,255,255]))
 
             for f_idx in range(total):
                 ret, frame = cap.read()
                 if not ret: break
+                hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
                 
-                # --- 円形検出（ハフ変換） ---
-                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-                gray = cv2.medianBlur(gray, 5)
-                # 白いリムを検出するためのパラメータ調整
-                circles = cv2.HoughCircles(gray, cv2.HOUGH_GRADIENT, dp=1, minDist=w//4,
-                                          param1=100, param2=30, minRadius=20, maxRadius=200)
+                # --- 緑の重心（中心点）の検出 ---
+                mask_g = cv2.inRange(hsv, L_G[0], L_G[1])
+                con_g, _ = cv2.findContours(mask_g, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
                 
-                gx, gy = np.nan, np.nan
-                if circles is not None:
-                    circles = np.uint16(np.around(circles))
-                    # 最も「円らしい」ものを採用
-                    gx, gy, gr = circles[0, 0]
-                    # ジャンプ防止：前フレームから離れすぎていたら無視（ノイズ対策）
-                    if not np.isnan(last_gx):
-                        dist = np.sqrt((gx-last_gx)**2 + (gy-last_gy)**2)
-                        if dist > 50: # 50px以上飛んだらノイズとみなす
-                            gx, gy = last_gx, last_gy
-                    last_gx, last_gy = gx, gy
+                new_gx, new_gy = np.nan, np.nan
+                if con_g:
+                    c = max(con_g, key=cv2.contourArea)
+                    M = cv2.moments(c)
+                    if M["m00"] > 100: # ある程度の大きさがある場合のみ採用
+                        new_gx, new_gy = M["m10"]/M["m00"], M["m01"]/M["m00"]
+                
+                # ジャンプ・リジェクション（急激な移動の抑制）
+                if not np.isnan(last_valid_gx) and not np.isnan(new_gx):
+                    dist = np.sqrt((new_gx - last_valid_gx)**2 + (new_gy - last_valid_gy)**2)
+                    if dist > 60: # 60px以上の移動はノイズとみなして無視
+                        new_gx, new_gy = last_valid_gx, last_valid_gy
+                
+                if not np.isnan(new_gx):
+                    last_valid_gx, last_valid_gy = new_gx, new_gy
                 else:
-                    gx, gy = last_gx, last_gy # 見失った場合は前フレームを維持
+                    new_gx, new_gy = last_valid_gx, last_valid_gy # 見失った場合は保持
 
-                # --- ピンクの追跡点（解析エリア内） ---
+                gx, gy = new_gx, new_gy
+
+                # --- ピンクの追跡点 ---
                 bx, by = np.nan, np.nan
                 if not np.isnan(gx):
-                    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-                    mask = np.zeros((h, w), dtype=np.uint8)
-                    cv2.circle(mask, (int(gx), int(gy)), mask_radius_px, 255, -1)
-                    mask_p = cv2.inRange(cv2.bitwise_and(hsv, hsv, mask=mask), L_P[0], L_P[1])
+                    mc = np.zeros((h, w), dtype=np.uint8)
+                    cv2.circle(mc, (int(gx), int(gy)), mask_size, 255, -1)
+                    mask_p = cv2.inRange(cv2.bitwise_and(hsv, hsv, mask=mc), L_P[0], L_P[1])
                     con_p, _ = cv2.findContours(mask_p, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
                     if con_p:
                         cp = max(con_p, key=cv2.contourArea)
@@ -124,6 +130,12 @@ if uploaded_file:
             
             cap.release()
             df = pd.DataFrame(data_log).interpolate().ffill().bfill()
+            
+            # 座標データの移動平均スムージング（震え対策）
+            if len(df) > 5:
+                df["gx"] = df["gx"].rolling(window=5, center=True).mean().fillna(method='bfill').fillna(method='ffill')
+                df["gy"] = df["gy"].rolling(window=5, center=True).mean().fillna(method='bfill').fillna(method='ffill')
+
             if len(df) > 31:
                 df["x"] = savgol_filter(df["x"], 15, 2)
                 df["v"] = savgol_filter(df["x"].diff().fillna(0)*fps, 31, 2)
@@ -136,7 +148,7 @@ if uploaded_file:
     df = st.session_state.df
     st.divider()
 
-    # --- ブラウザ プレビュー (2x2) ---
+    # --- ブラウザ プレビュー ---
     st.subheader("🖱️ タイムライン・プレビュー")
     time_idx = st.slider("時間をスキャン", 0, len(df)-1, 0)
     curr_row = df.iloc[time_idx]
@@ -167,17 +179,8 @@ if uploaded_file:
         st.image(create_graph_image(df.iloc[:time_idx+1], "x", "F", "x", "F", "m", "N", 'purple', 450, x_m, f_mi, f_ma, shade_range=(x1_in, x2_in)), channels="BGR")
         st.latex(rf"F = {curr_row['F']:.3f} \, \text{{N}}")
 
-    st.divider()
-    df_w = df[(df["x"] >= x1_in) & (df["x"] <= x2_in)].sort_values("x")
-    if len(df_w) > 1:
-        w_val = np.trapz(df_w["F"], df_w["x"])
-        dk_val = 0.5 * mass_input * (df_w["v"].iloc[-1]**2 - df_w["v"].iloc[0]**2)
-        cola, colb = st.columns(2)
-        cola.latex(rf"W = {format_sci_latex(w_val)} \, \text{{J}}")
-        colb.latex(rf"\Delta K = {format_sci_latex(dk_val)} \, \text{{J}}")
-
     # --- 解析動画合成 ---
-    if st.button("🎥 解析動画を生成"):
+    if st.button(f"🎥 ver {VERSION} 動画を生成"):
         meta = st.session_state.video_meta
         final_path = tempfile.NamedTemporaryFile(suffix='.mp4', delete=False).name
         v_size = meta["w"] // 4
@@ -211,7 +214,7 @@ if uploaded_file:
                 cv2.putText(canvas, val_text, (tx, v_size + 60), font, 0.55, (255,255,255), 2)
 
             if not np.isnan(curr['gx']):
-                cv2.circle(frame, (int(curr['gx']), int(curr['gy'])), mask_radius_px, (255,255,0), 2)
+                cv2.circle(frame, (int(curr['gx']), int(curr['gy'])), mask_size, (255,255,0), 2)
                 cv2.circle(frame, (int(curr['gx']), int(curr['gy'])), 5, (0,255,0), -1)
                 if not np.isnan(curr['bx']):
                     cv2.circle(frame, (int(curr['bx']), int(curr['by'])), 5, (255,0,255), -1)
@@ -226,4 +229,4 @@ if uploaded_file:
             
         cap.release(); out.release()
         with open(final_path, "rb") as f:
-            st.download_button(f"🎥 v{VERSION} 動画を保存", f, f"cart_v{VERSION}.mp4")
+            st.download_button(f"🎥 v{VERSION} (Smooth) 保存", f, f"cart_v{VERSION}_smooth.mp4")
