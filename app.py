@@ -31,6 +31,7 @@ def create_graph_image(df_sub, x_col, y_col, x_label, y_label, x_unit, y_unit, c
             ax.plot(df_sub[x_col], df_sub[y_col], color=color, linewidth=2, alpha=0.8)
             ax.scatter(df_sub[x_col].iloc[-1], df_sub[y_col].iloc[-1], color=color, s=60, edgecolors='white', zorder=5)
             
+            # 指定された場合のみ塗りつぶし（ブラウザ用）
             if shade_range is not None and y_col == 'F':
                 x1, x2 = shade_range
                 mask = (df_sub[x_col] >= x1) & (df_sub[x_col] <= x2)
@@ -117,7 +118,7 @@ if uploaded_file:
     df = st.session_state.df
     st.divider()
 
-    # --- インタラクティブ表示 (2x2) ---
+    # --- ブラウザ プレビュー (2x2) ---
     st.subheader("🖱️ タイムライン・プレビュー")
     time_idx = st.slider("時間をスキャン", 0, len(df)-1, 0)
     curr_row = df.iloc[time_idx]
@@ -145,6 +146,7 @@ if uploaded_file:
         st.image(create_graph_image(df.iloc[:time_idx+1], "t", "a", "t", "a", "s", "m/s^2", 'green', 450, t_m, a_mi, a_ma), channels="BGR")
         st.latex(rf"a = {curr_row['a']:.3f} \, \text{{m/s}}^2")
     with r2c2:
+        # ブラウザ上は積分範囲に色をつける
         st.image(create_graph_image(df.iloc[:time_idx+1], "x", "F", "x", "F", "m", "N", 'purple', 450, x_m, f_mi, f_ma, shade_range=(x1_in, x2_in)), channels="BGR")
         st.latex(rf"F = {curr_row['F']:.3f} \, \text{{N}}")
 
@@ -157,27 +159,26 @@ if uploaded_file:
         cola.latex(rf"W = {format_sci_latex(w_val)} \, \text{{J}}")
         colb.latex(rf"\Delta K = {format_sci_latex(dk_val)} \, \text{{J}}")
 
-    # --- 動画合成セクション ---
+    # --- 解析動画合成 ---
     if st.button("🎥 解析動画を生成"):
         meta = st.session_state.video_meta
         final_path = tempfile.NamedTemporaryFile(suffix='.mp4', delete=False).name
         v_size = meta["w"] // 4
-        header_h = v_size + 120
+        header_h = v_size + 100
         font = cv2.FONT_HERSHEY_SIMPLEX
         
-        # 数値を確実に float で取得
         t_limit = float(df["t"].max())
         x_limit = float(df["x"].max())
         v_min, v_max = float(df["v"].min()), float(df["v"].max())
         a_min, a_max = float(df["a"].min()), float(df["a"].max())
         f_min, f_max = float(df["F"].min()), float(df["F"].max())
 
-        # グラフ情報をリスト化 (エラー防止のため展開をシンプルに)
+        # 動画用の設定（shade_rangeは常にNone）
         graph_configs = [
-            {"xc": "t", "yc": "x", "col": "blue", "xu": "s", "yu": "m", "ymn": 0.0, "ymx": x_limit, "xm": t_limit},
-            {"xc": "t", "yc": "v", "col": "red", "xu": "s", "yu": "m/s", "ymn": v_min, "ymx": v_max, "xm": t_limit},
-            {"xc": "t", "yc": "a", "col": "green", "xu": "s", "yu": "m/s^2", "ymn": a_min, "ymx": a_max, "xm": t_limit},
-            {"xc": "x", "yc": "F", "col": "purple", "xu": "m", "yu": "N", "ymn": f_min, "ymx": f_max, "xm": x_limit}
+            {"xc": "t", "yc": "x", "col": "blue", "xu": "m", "sym": "x", "ymn": 0.0, "ymx": x_limit, "xm": t_limit},
+            {"xc": "t", "yc": "v", "col": "red", "xu": "m/s", "sym": "v", "ymn": v_min, "ymx": v_max, "xm": t_limit},
+            {"xc": "t", "yc": "a", "col": "green", "xu": "m/s2", "sym": "a", "ymn": a_min, "ymx": a_max, "xm": t_limit},
+            {"xc": "x", "yc": "F", "col": "purple", "xu": "N", "sym": "F", "ymn": f_min, "ymx": f_max, "xm": x_limit}
         ]
 
         out = cv2.VideoWriter(final_path, cv2.VideoWriter_fourcc(*'mp4v'), meta["fps"], (meta["w"], meta["h"] + header_h))
@@ -192,22 +193,27 @@ if uploaded_file:
             df_s = df.iloc[:i+1]
             
             for idx, g in enumerate(graph_configs):
-                sr = (x1_in, x2_in) if g["yc"] == 'F' else None
-                g_img = create_graph_image(df_s, g["xc"], g["yc"], g["xc"], g["yc"], g["xu"], g["yu"], g["col"], v_size, g["xm"], g["ymn"], g["ymx"], shade_range=sr)
+                # 動画内F-xグラフは積分色付けなし
+                g_img = create_graph_image(df_s, g["xc"], g["yc"], g["xc"], g["yc"], "", "", g["col"], v_size, g["xm"], g["ymn"], g["ymx"], shade_range=None)
                 canvas[0:v_size, idx*v_size:(idx+1)*v_size] = g_img
                 
-                # 数値描画
-                val_text = f"{curr[g['yc']]:>+7.3f} {g['yu']}"
-                (tw, th), _ = cv2.getTextSize(val_text, font, 0.6, 2)
+                # 瞬間値描画 (x = +0.123 m の形式)
+                val_text = f"{g['sym']} = {curr[g['yc']]:>+7.3f} {g['xu']}"
+                (tw, th), _ = cv2.getTextSize(val_text, font, 0.55, 2)
                 tx = idx*v_size + (v_size - tw)//2
-                cv2.putText(canvas, val_text, (tx, v_size + 50), font, 0.6, (255,255,255), 2)
+                cv2.putText(canvas, val_text, (tx, v_size + 60), font, 0.55, (255,255,255), 2)
 
-            # 解析エリア（円）
+            # 解析エリア（円）と時刻 t の表示
             if not np.isnan(curr['gx']):
                 cv2.circle(frame, (int(curr['gx']), int(curr['gy'])), mask_size, (255,255,0), 2)
                 cv2.circle(frame, (int(curr['gx']), int(curr['gy'])), 5, (0,255,0), -1)
                 if not np.isnan(curr['bx']):
                     cv2.circle(frame, (int(curr['bx']), int(curr['by'])), 5, (255,0,255), -1)
+            
+            # 時刻 t = 〇.〇〇 s を右下に表示
+            t_text = f"t = {curr['t']:.2f} s"
+            (ttw, tth), _ = cv2.getTextSize(t_text, font, 0.8, 2)
+            cv2.putText(frame, t_text, (meta["w"] - ttw - 20, meta["h"] - 30), font, 0.8, (255,255,255), 2, cv2.LINE_AA)
             
             canvas[header_h:, :] = frame
             out.write(canvas)
@@ -215,4 +221,4 @@ if uploaded_file:
             
         cap.release(); out.release()
         with open(final_path, "rb") as f:
-            st.download_button("🎥 完成動画を保存", f, "cart_analysis.mp4")
+            st.download_button("🎥 完成動画を保存", f, "cart_analysis_final.mp4")
