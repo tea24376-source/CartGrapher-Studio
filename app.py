@@ -11,15 +11,17 @@ import io
 plt.switch_backend('Agg')
 plt.rcParams['mathtext.fontset'] = 'cm'
 RADIUS_M = 0.016
-VERSION = "2.3"
+VERSION = "2.4"
 MAX_DURATION = 10.0
 
 def format_sci_latex(val):
+    """指数表記を美しく整形"""
     try:
         if abs(val) < 1e-6 and val != 0: return "0"
-        s = f"{val:.1e}"
+        s = f"{val:.2e}"
         base, exp = s.split('e')
         exp_int = int(exp)
+        if exp_int == 0: return f"{float(base):.2f}"
         return rf"{base} \times 10^{{{exp_int}}}"
     except: return "0"
 
@@ -52,7 +54,7 @@ def create_graph_image(df_sub, x_col, y_col, x_label, y_label, x_unit, y_unit, c
 st.set_page_config(page_title=f"CartGrapher Studio v{VERSION}", layout="wide")
 st.title(f"🚀 CartGrapher Studio ver {VERSION}")
 
-# --- サイドバー設定 ---
+# --- サイドバー：解析設定 ---
 st.sidebar.header("解析設定")
 mass_input = st.sidebar.number_input("台車の質量 m (kg)", value=0.100, min_value=0.001, format="%.3f", step=0.001)
 mask_size = st.sidebar.slider("解析エリア半径 (px)", 50, 400, 200, 10)
@@ -130,24 +132,23 @@ if uploaded_file:
     df = st.session_state.df
     st.divider()
 
-    # --- サイドバー：データ表示 ---
+    # --- サイドバー：データ取得 ---
     st.sidebar.markdown("---")
     st.sidebar.subheader("📊 積分・計算用データ")
     t_max_limit = float(df["t"].max())
     
-    # t1
     t1 = st.sidebar.number_input(r"開始時刻 $t_1$ [s]", 0.0, t_max_limit, 0.0, 0.01)
     row1 = df.iloc[(df['t']-t1).abs().argsort()[:1]]
-    st.sidebar.markdown(f"- $x_1$: `{row1['x'].values[0]:.3f}` m")
-    st.sidebar.markdown(f"- $v_1$: `{row1['v'].values[0]:.3f}` m/s")
+    st.sidebar.markdown(rf"$x_1 = {row1['x'].values[0]:.3f} \text{{ m}}$")
+    st.sidebar.markdown(rf"$v_1 = {row1['v'].values[0]:.3f} \text{{ m/s}}$")
     st.sidebar.markdown("---")
-    # t2
+    
     t2 = st.sidebar.number_input(r"終了時刻 $t_2$ [s]", 0.0, t_max_limit, t_max_limit, 0.01)
     row2 = df.iloc[(df['t']-t2).abs().argsort()[:1]]
-    st.sidebar.markdown(f"- $x_2$: `{row2['x'].values[0]:.3f}` m")
-    st.sidebar.markdown(f"- $v_2$: `{row2['v'].values[0]:.3f}` m/s")
+    st.sidebar.markdown(rf"$x_2 = {row2['x'].values[0]:.3f} \text{{ m}}$")
+    st.sidebar.markdown(rf"$v_2 = {row2['v'].values[0]:.3f} \text{{ m/s}}$")
 
-    # メイン：グラフ
+    # メイン画面：スライダーとグラフ
     time_list = [round(t, 4) for t in df["t"].tolist()]
     selected_t = st.select_slider("時刻をスキャン [s]", options=time_list, value=time_list[0])
     time_idx = time_list.index(selected_t); curr_row = df.iloc[time_idx]
@@ -157,29 +158,31 @@ if uploaded_file:
     a_mi, a_ma = float(df["a"].min()), float(df["a"].max())
     f_mi, f_ma = float(df["F"].min()), float(df["F"].max())
 
-    r1c1, r1c2 = st.columns(2)
-    with r1c1:
+    # 瞬間値表示を「変数=値 単位」の形式に修正
+    col1, col2 = st.columns(2)
+    with col1:
         st.image(create_graph_image(df.iloc[:time_idx+1], "t", "x", "t", "x", "s", "m", 'blue', 450, t_m, 0.0, x_m), channels="BGR")
-        st.markdown(f"<div style='text-align: center;'>$x = {curr_row['x']:.3f} \, \\text{{m}}$</div>", unsafe_allow_html=True)
-    with r1c2:
+        st.markdown(f"<div style='text-align: center; font-size: 1.2em;'>$x = {curr_row['x']:.3f}\\text{{ m}}$</div>", unsafe_allow_html=True)
+    with col2:
         st.image(create_graph_image(df.iloc[:time_idx+1], "t", "v", "t", "v", "s", "m/s", 'red', 450, t_m, v_mi, v_ma), channels="BGR")
-        st.markdown(f"<div style='text-align: center;'>$v = {curr_row['v']:.3f} \, \\text{{m/s}}$</div>", unsafe_allow_html=True)
+        st.markdown(f"<div style='text-align: center; font-size: 1.2em;'>$v = {curr_row['v']:.3f}\\text{{ m/s}}$</div>", unsafe_allow_html=True)
 
-    r2c1, r2c2 = st.columns(2)
-    with r2c1:
+    col3, col4 = st.columns(2)
+    with col3:
         st.image(create_graph_image(df.iloc[:time_idx+1], "t", "a", "t", "a", "s", "m/s^2", 'green', 450, t_m, a_mi, a_ma), channels="BGR")
-        st.markdown(f"<div style='text-align: center;'>$a = {curr_row['a']:.3f} \, \\text{{m/s}}^2$</div>", unsafe_allow_html=True)
-    with r2c2:
+        st.markdown(f"<div style='text-align: center; font-size: 1.2em;'>$a = {curr_row['a']:.3f}\\text{{ m/s}}^2$</div>", unsafe_allow_html=True)
+    with col4:
         st.image(create_graph_image(df.iloc[:time_idx+1], "x", "F", "x", "F", "m", "N", 'purple', 450, x_m, f_mi, f_ma, shade_range=(t1, t2)), channels="BGR")
-        st.markdown(f"<div style='text-align: center;'>$F = {curr_row['F']:.3f} \, \\text{{N}}$</div>", unsafe_allow_html=True)
+        st.markdown(f"<div style='text-align: center; font-size: 1.2em;'>$F = {curr_row['F']:.3f}\\text{{ N}}$</div>", unsafe_allow_html=True)
 
     st.divider()
     
-    # 仕事の計算
+    # 仕事の表示（シンプル化）
     df_w = df[(df["t"] >= t1) & (df["t"] <= t2)]
     if len(df_w) > 1:
         w_val = np.trapz(df_w["F"], df_w["x"])
-        st.markdown(f"<div style='text-align: center; font-size: 1.5em;'>$W = {format_sci_latex(w_val)} \, \\text{{J}}$</div>", unsafe_allow_html=True)
+        # W = 値 単位 の形式
+        st.markdown(f"<div style='text-align: center; font-size: 1.8em; font-weight: bold;'>$W = {format_sci_latex(w_val)}\\text{{ J}}$</div>", unsafe_allow_html=True)
 
     # 動画生成
     if st.button(f"🎥 解析動画を生成"):
