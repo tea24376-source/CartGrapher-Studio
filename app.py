@@ -15,6 +15,8 @@ RADIUS_M = 0.016  # 1.6cm固定
 
 def format_sci_latex(val):
     try:
+        if abs(val) < 1e-4 and val != 0: # 極端に小さい値の処理
+            return "0"
         s = f"{val:.1e}"
         base, exp = s.split('e')
         exp_int = int(exp)
@@ -30,8 +32,9 @@ def create_graph_image(df_sub, x_col, y_col, x_label, y_label, x_unit, y_unit, c
             ax.plot(df_sub[x_col], df_sub[y_col], color=color, linewidth=2, alpha=0.8)
             ax.scatter(df_sub[x_col].iloc[-1], df_sub[y_col].iloc[-1], color=color, s=60, edgecolors='white', zorder=5)
             
-            if shade_range is not None:
+            if shade_range is not None and y_col == 'F':
                 x1, x2 = shade_range
+                # 積分範囲のデータを抽出して塗りつぶし
                 mask = (df_sub[x_col] >= x1) & (df_sub[x_col] <= x2)
                 ax.fill_between(df_sub[x_col], df_sub[y_col], where=mask, color=color, alpha=0.3)
         
@@ -101,7 +104,7 @@ if uploaded_file:
                         elif diff < -np.pi: diff += 2*np.pi
                         total_angle += diff
                     prev_angle = curr_a
-                data_log.append({"t": f_idx/fps, "x": total_angle*RADIUS_M, "v": 0, "a": 0, "F": 0, "gx": gx, "gy": gy, "bx": bx, "by": by})
+                data_log.append({"t": f_idx/fps, "x": total_angle*RADIUS_M, "gx": gx, "gy": gy, "bx": bx, "by": by})
             
             cap.release()
             df = pd.DataFrame(data_log).interpolate().ffill().bfill()
@@ -133,21 +136,20 @@ if uploaded_file:
     F_min, F_max = df["F"].min(), df["F"].max()
     ps = 450 # グラフサイズ
 
-    # 1行目
-    row1_col1, row1_col2 = st.columns(2)
-    with row1_col1:
+    # 2x2 レイアウト
+    r1c1, r1c2 = st.columns(2)
+    with r1c1:
         st.image(create_graph_image(df.iloc[:time_idx+1], "t", "x", "t", "x", "s", "m", 'blue', ps, t_max, 0, x_max), channels="BGR")
         st.latex(rf"x = {curr_row['x']:.3f} \, \text{{m}}")
-    with row1_col2:
+    with r1c2:
         st.image(create_graph_image(df.iloc[:time_idx+1], "t", "v", "t", "v", "s", "m/s", 'red', ps, t_max, v_min, v_max), channels="BGR")
         st.latex(rf"v = {curr_row['v']:.3f} \, \text{{m/s}}")
 
-    # 2行目
-    row2_col1, row2_col2 = st.columns(2)
-    with row2_col1:
+    r2c1, r2c2 = st.columns(2)
+    with r2c1:
         st.image(create_graph_image(df.iloc[:time_idx+1], "t", "a", "t", "a", "s", "m/s^2", 'green', ps, t_max, a_min, a_max), channels="BGR")
         st.latex(rf"a = {curr_row['a']:.3f} \, \text{{m/s}}^2")
-    with row2_col2:
+    with r2c2:
         st.image(create_graph_image(df.iloc[:time_idx+1], "x", "F", "x", "F", "m", "N", 'purple', ps, x_max, F_min, F_max, shade_range=(x1_in, x2_in)), channels="BGR")
         st.latex(rf"F = {curr_row['F']:.3f} \, \text{{N}}")
 
@@ -167,6 +169,9 @@ if uploaded_file:
         final_path = tempfile.NamedTemporaryFile(suffix='.mp4', delete=False).name
         v_size = meta["w"] // 4
         header_h = v_size + 120
+        # cv2.FONT_HERSHEY_SIMPLEX に変更（AttributeError回避）
+        font_style = cv2.FONT_HERSHEY_SIMPLEX
+        
         out = cv2.VideoWriter(final_path, cv2.VideoWriter_fourcc(*'mp4v'), meta["fps"], (meta["w"], meta["h"] + header_h))
         cap = cv2.VideoCapture(meta["path"])
         p_bar = st.progress(0.0)
@@ -178,25 +183,29 @@ if uploaded_file:
             curr = df.iloc[i]; df_s = df.iloc[:i+1]
             graphs = [('t','x','blue','s','m', 0, x_max), ('t','v','red','s','m/s', v_min, v_max),
                       ('t','a','green','s','m/s2', a_min, a_max), ('x','F','purple','m','N', F_min, F_max)]
+            
             for idx, (xc, yc, col, xu, yu, ymi, yma) in enumerate(graphs):
                 sr = (x1_in, x2_in) if yc == 'F' else None
                 g_img = create_graph_image(df_s, xc, yc, xc, yc, xu, yu, col, v_size, (x_max if xc=='x' else t_max), ymi, yma, shade_range=sr)
                 canvas[0:v_size, idx*v_size:(idx+1)*v_size] = g_img
-                val = curr[yc]
-                txt = f"{val: >+7.3f} {yu}"
-                (tw, th), _ = cv2.getTextSize(txt, cv2.FONT_HERSHEY_MONO, 0.7, 2)
+                
+                # 瞬間値の描画 (中央下)
+                val_text = f"{curr[yc]:>+7.3f} {yu}"
+                (tw, th), _ = cv2.getTextSize(val_text, font_style, 0.7, 2)
                 tx = idx*v_size + (v_size - tw)//2
-                cv2.putText(canvas, txt, (tx, v_size + 50), cv2.FONT_HERSHEY_MONO, 0.7, (255,255,255), 2)
+                cv2.putText(canvas, val_text, (tx, v_size + 60), font_style, 0.7, (255,255,255), 2)
 
+            # 解析エリア（円）の表示
             if not np.isnan(curr['gx']):
                 cv2.circle(frame, (int(curr['gx']), int(curr['gy'])), mask_size, (255,255,0), 2)
                 cv2.circle(frame, (int(curr['gx']), int(curr['gy'])), 5, (0,255,0), -1)
                 if not np.isnan(curr['bx']):
                     cv2.circle(frame, (int(curr['bx']), int(curr['by'])), 5, (255,0,255), -1)
+            
             canvas[header_h:, :] = frame
             out.write(canvas)
-            if i % 20 == 0: p_bar.progress(i/len(df))
+            if i % 20 == 0: p_bar.progress(min(i/len(df), 1.0))
             
         cap.release(); out.release()
         with open(final_path, "rb") as f:
-            st.download_button("🎥 動画をダウンロード", f, "physics_analysis.mp4")
+            st.download_button("🎥 解析動画をダウンロード", f, "physics_analysis.mp4")
