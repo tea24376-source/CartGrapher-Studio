@@ -11,8 +11,8 @@ import io
 plt.switch_backend('Agg')
 plt.rcParams['mathtext.fontset'] = 'cm'
 RADIUS_M = 0.016
-VERSION = "1.9"
-MAX_DURATION = 10.0 # サーバー保護のための時間制限
+VERSION = "2.0"
+MAX_DURATION = 10.0
 
 def format_sci_latex(val):
     try:
@@ -51,7 +51,6 @@ def create_graph_image(df_sub, x_col, y_col, x_label, y_label, x_unit, y_unit, c
 
 st.set_page_config(page_title=f"CartGrapher Studio v{VERSION}", layout="wide")
 st.title(f"🚀 CartGrapher Studio ver {VERSION}")
-st.caption("最高精度モード：全フレーム・全ピクセル解析（ver 1.3相当）")
 
 st.sidebar.header("解析設定")
 mass_input = st.sidebar.number_input("台車の質量 m (kg)", value=0.100, min_value=0.001, format="%.3f", step=0.001)
@@ -60,7 +59,6 @@ mask_size = st.sidebar.slider("解析エリア半径 (px)", 50, 400, 200, 10)
 uploaded_file = st.file_uploader("動画をアップロード (10秒以内)", type=["mp4", "mov"])
 
 if uploaded_file:
-    # --- バリデーションチェック ---
     tfile_temp = tempfile.NamedTemporaryFile(delete=False)
     tfile_temp.write(uploaded_file.read())
     cap_check = cv2.VideoCapture(tfile_temp.name)
@@ -70,15 +68,14 @@ if uploaded_file:
     cap_check.release()
 
     if duration > MAX_DURATION:
-        st.error(f"❌ 動画時間が長い({duration:.1f}秒)ため解析できません。10秒以内に編集してください。")
+        st.error(f"❌ 動画時間が長い({duration:.1f}秒)ため停止。10秒以内に編集してください。")
         st.stop()
 
     if "df" not in st.session_state or st.session_state.get("file_id") != uploaded_file.name:
-        with st.spinner("最高精度で解析中... (全フレームを処理しています)"):
+        with st.spinner("ver 1.3相当の最高精度エンジンで解析中..."):
             cap = cv2.VideoCapture(tfile_temp.name)
             fps = cap.get(cv2.CAP_PROP_FPS) or 30
-            w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-            h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            w, h = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
             
             data_log = []
             total_angle, prev_angle = 0.0, None
@@ -90,11 +87,9 @@ if uploaded_file:
                 ret, frame = cap.read()
                 if not ret: break
                 
-                # --- ver 1.3 相当の全フレーム処理 ---
                 hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
                 mask_g = cv2.inRange(hsv, L_G[0], L_G[1])
                 con_g, _ = cv2.findContours(mask_g, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-                
                 new_gx, new_gy = np.nan, np.nan
                 if con_g:
                     c = max(con_g, key=cv2.contourArea); M = cv2.moments(c)
@@ -127,16 +122,20 @@ if uploaded_file:
                         total_angle += diff
                     prev_angle = curr_a
                 
-                data_log.append({"t": round(f_idx/fps, 4), "x": total_angle*RADIUS_M, "gx": gx, "gy": gy, "bx": bx, "by": by})
+                data_log.append({"t": f_idx/fps, "x": total_angle*RADIUS_M, "gx": gx, "gy": gy, "bx": bx, "by": by})
                 f_idx += 1
 
             cap.release()
             df = pd.DataFrame(data_log).interpolate().ffill().bfill()
-            if len(df) > 15:
-                df["x"] = savgol_filter(df["x"], 11, 2)
-                dt = 1.0 / fps
-                df["v"] = savgol_filter(df["x"].diff().fillna(0)/dt, 15, 2)
-                df["a"] = savgol_filter(df["v"].diff().fillna(0)/dt, 15, 2)
+            
+            # --- ver 1.3 数値処理の完全移植 ---
+            if len(df) > 5:
+                df["gx"] = df["gx"].rolling(window=5, center=True).mean().ffill().bfill()
+                df["gy"] = df["gy"].rolling(window=5, center=True).mean().ffill().bfill()
+            if len(df) > 31:
+                df["x"] = savgol_filter(df["x"], 15, 2)
+                df["v"] = savgol_filter(df["x"].diff().fillna(0)*fps, 31, 2)
+                df["a"] = savgol_filter(df["v"].diff().fillna(0)*fps, 31, 2)
                 df["F"] = mass_input * df["a"]
             
             st.session_state.df = df
@@ -146,17 +145,16 @@ if uploaded_file:
     df = st.session_state.df
     st.divider()
 
-    # --- プレビュー (ver 1.8 準拠の時刻スライダー) ---
     st.subheader("🖱️ タイムライン・プレビュー")
-    time_list = df["t"].tolist()
+    time_list = [round(t, 4) for t in df["t"].tolist()]
     selected_t = st.select_slider("時刻を選択 [s]", options=time_list, value=time_list[0])
-    curr_row = df[df["t"] == selected_t].iloc[0]
-    time_idx = df.index[df["t"] == selected_t][0]
+    time_idx = time_list.index(selected_t)
+    curr_row = df.iloc[time_idx]
     
     st.sidebar.markdown("---")
     st.sidebar.subheader("積分範囲 (F-x)")
-    x1_in = st.sidebar.number_input("開始 x1 [m]", value=float(df["x"].min()), format="%.3f", step=0.001)
-    x2_in = st.sidebar.number_input("終了 x2 [m]", value=float(df["x"].max()), format="%.3f", step=0.001)
+    x1_in = st.sidebar.number_input("開始 x1 [m]", value=float(df["x"].min()), format="%.3f")
+    x2_in = st.sidebar.number_input("終了 x2 [m]", value=float(df["x"].max()), format="%.3f")
 
     t_m, x_m = float(df["t"].max()), float(df["x"].max())
     v_mi, v_ma = float(df["v"].min()), float(df["v"].max())
@@ -188,7 +186,7 @@ if uploaded_file:
         cola.latex(rf"W = {format_sci_latex(w_val)} \, \text{{J}}")
         colb.latex(rf"\Delta K = {format_sci_latex(dk_val)} \, \text{{J}}")
 
-    if st.button(f"🎥 ver {VERSION} 高精度動画を生成"):
+    if st.button(f"🎥 ver {VERSION} 最終版動画を生成"):
         meta = st.session_state.video_meta
         final_path = tempfile.NamedTemporaryFile(suffix='.mp4', delete=False).name
         v_size, font = meta["w"] // 4, cv2.FONT_HERSHEY_SIMPLEX
