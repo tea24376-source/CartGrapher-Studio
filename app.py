@@ -1,7 +1,3 @@
-レイアウトが崩れてしまったので、前のバージョンでいきます。
-Colab版ももう一度作ってもらえますか？
-念のためコードを貼り付けます。
-
 import streamlit as st
 import cv2
 import numpy as np
