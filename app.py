@@ -68,8 +68,8 @@ st.set_page_config(page_title=f"CartGrapher Studio v{VERSION}", layout="wide")
 st.title(f"🚀 CartGrapher Studio ver {VERSION}")
 
 st.sidebar.header("解析設定")
-mass_input = st.sidebar.number_input("台車の質量 m (kg)", value=0.100, min_value=0.001, format="%.3f", step=0.001)
-mask_size = st.sidebar.slider("解析エリア半径 (px)", 50, 400, 200, 10)
+mass_input = st.sidebar.number_input("台車の質量 $m$ [kg]", value=0.100, min_value=0.001, format="%.3f", step=0.001)
+mask_size = st.sidebar.slider("解析エリア半径 [px]", 50, 400, 200, 10)
 
 uploaded_file = st.file_uploader("動画をアップロード (10秒以内)", type=["mp4", "mov"])
 
