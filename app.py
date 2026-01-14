@@ -12,7 +12,7 @@ import os
 plt.switch_backend('Agg')
 plt.rcParams['mathtext.fontset'] = 'cm'
 RADIUS_M = 0.016
-VERSION = "2.6.9"
+VERSION = "2.6.8"  # バージョンを更新
 MAX_DURATION = 10.0
 MAX_ANALYSIS_WIDTH = 1280
 
@@ -44,7 +44,7 @@ def create_graph_image(df_sub, x_col, y_col, x_label, y_label, x_unit, y_unit, c
                 mask = (df_sub['t'] >= t_s) & (df_sub['t'] <= t_e)
                 ax.fill_between(df_sub[x_col], df_sub[y_col], where=mask, color=color, alpha=0.3)
         
-        # グラフの軸ラベルには y_unit (LaTeX形式) をそのまま使用
+        # 軸ラベルには常にLaTeX形式の y_unit を使用
         ax.set_title(f"${y_label}$ - ${x_label}$", fontsize=14, fontweight='bold')
         ax.set_xlabel(f"${x_label}$ [{x_unit}]", fontsize=11)
         ax.set_ylabel(f"${y_label}$ [{y_unit}]", fontsize=11)
@@ -192,12 +192,14 @@ if uploaded_file:
         header_h = v_size + 100
         font = cv2.FONT_HERSHEY_SIMPLEX
         
+        # --- 設定変更点 ---
+        # "yu" はグラフ軸用(LaTeX) -> "m/s^2"
+        # "yu_cv" はOpenCV表示用(ASCII) -> "m/s^2" (または "m/s^2" とそのまま表示)
         graph_configs = [
             {"xc": "t", "yc": "x", "xl": "t", "yl": "x", "xu": "s", "yu": "m", "col": "blue", "ymn": 0.0, "ymx": x_m, "xm": t_m},
             {"xc": "t", "yc": "v", "xl": "t", "yl": "v", "xu": "s", "yu": "m/s", "col": "red", "ymn": v_mi, "ymx": v_ma, "xm": t_m},
-            # --- 【厳密な修正】グラフ軸は m/s^2 (LaTeX)、OpenCV用(yu_cv)は m/s^2 (ASCII) ---
+            # ↓ ここを修正: yuはグラフ用、yu_cvはOpenCV用として分離
             {"xc": "t", "yc": "a", "xl": "t", "yl": "a", "xu": "s", "yu": "m/s^2", "yu_cv": "m/s^2", "col": "green", "ymn": a_mi, "ymx": a_ma, "xm": t_m},
-            # -------------------------------------------------------------------------
             {"xc": "x", "yc": "F", "xl": "x", "yl": "F", "xu": "m", "yu": "N", "col": "purple", "ymn": f_mi, "ymx": f_ma, "xm": x_m}
         ]
 
@@ -224,14 +226,14 @@ if uploaded_file:
             df_s = df.iloc[:i+1]
             
             for idx, g in enumerate(graph_configs):
-                # グラフ作成には "yu" (LaTeX形式) を使用
+                # グラフ作成時は "yu" (LaTeX形式) を使用
                 g_img = create_graph_image(df_s, g["xc"], g["yc"], g["xl"], g["yl"], g["xu"], g["yu"], g["col"], v_size, g["xm"], g["ymn"], g["ymx"], shade_range=None, markers=None)
                 canvas[0:v_size, idx*v_size:(idx+1)*v_size] = g_img
                 
-                # --- 動画内のテキストオーバーレイには "yu_cv" (あれば) を優先使用 ---
-                disp_unit = g.get("yu_cv", g["yu"]) 
+                # --- 動画内のテキスト表示は yu_cv (あれば) を優先 ---
+                disp_unit = g.get("yu_cv", g["yu"])
                 val_text = f"{g['yl']} = {curr[g['yc']]:>+7.3f} {disp_unit}"
-                # -------------------------------------------------------------
+                # ------------------------------------------------
                 
                 (tw, th), _ = cv2.getTextSize(val_text, font, 0.5, 1)
                 cv2.putText(canvas, val_text, (idx*v_size + (v_size-tw)//2, v_size + 50), font, 0.5, (255,255,255), 1, cv2.LINE_AA)
