@@ -12,7 +12,7 @@ import os
 plt.switch_backend('Agg')
 plt.rcParams['mathtext.fontset'] = 'cm'
 RADIUS_M = 0.016
-VERSION = "2.6.9_fixed" # 修正版
+VERSION = "2.7.0_layout_fixed" # レイアウト調整版
 MAX_DURATION = 10.0
 MAX_ANALYSIS_WIDTH = 1280
 
@@ -44,7 +44,6 @@ def create_graph_image(df_sub, x_col, y_col, x_label, y_label, x_unit, y_unit, c
                 mask = (df_sub['t'] >= t_s) & (df_sub['t'] <= t_e)
                 ax.fill_between(df_sub[x_col], df_sub[y_col], where=mask, color=color, alpha=0.3)
         
-        # 軸ラベル: 渡された y_unit (m/s²など) をそのまま使用
         ax.set_title(f"${y_label}$ - ${x_label}$", fontsize=14, fontweight='bold')
         ax.set_xlabel(f"${x_label}$ [{x_unit}]", fontsize=11)
         ax.set_ylabel(f"${y_label}$ [{y_unit}]", fontsize=11)
@@ -79,16 +78,11 @@ if uploaded_file:
         with st.spinner("最高精度エンジンで解析中..."):
             cap = cv2.VideoCapture(tfile_temp.name)
             fps = cap.get(cv2.CAP_PROP_FPS) or 30
-            
             raw_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
             raw_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-            
             scale_factor = 1.0
-            if raw_w > MAX_ANALYSIS_WIDTH:
-                scale_factor = MAX_ANALYSIS_WIDTH / raw_w
-            
-            w = int(raw_w * scale_factor)
-            h = int(raw_h * scale_factor)
+            if raw_w > MAX_ANALYSIS_WIDTH: scale_factor = MAX_ANALYSIS_WIDTH / raw_w
+            w, h = int(raw_w * scale_factor), int(raw_h * scale_factor)
 
             data_log = []; total_angle, prev_angle = 0.0, None; last_valid_gx, last_valid_gy = np.nan, np.nan
             L_G, L_P = (np.array([35,50,50]), np.array([85,255,255])), (np.array([140,40,40]), np.array([180,255,255]))
@@ -96,12 +90,7 @@ if uploaded_file:
             while True:
                 ret, frame_raw = cap.read()
                 if not ret: break
-                
-                if scale_factor < 1.0:
-                    frame = cv2.resize(frame_raw, (w, h))
-                else:
-                    frame = frame_raw
-
+                frame = cv2.resize(frame_raw, (w, h)) if scale_factor < 1.0 else frame_raw
                 hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
                 mask_g = cv2.inRange(hsv, L_G[0], L_G[1]); con_g, _ = cv2.findContours(mask_g, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
                 new_gx, new_gy = np.nan, np.nan
@@ -134,7 +123,6 @@ if uploaded_file:
             if len(df) > 31:
                 df["x"] = savgol_filter(df["x"], 15, 2); df["v"] = savgol_filter(df["x"].diff().fillna(0)*fps, 31, 2)
                 df["a"] = savgol_filter(df["v"].diff().fillna(0)*fps, 31, 2); df["F"] = mass_input * df["a"]
-            
             st.session_state.df = df; 
             st.session_state.video_meta = {"fps": fps, "w": w, "h": h, "path": tfile_temp.name, "scale": scale_factor}
             st.session_state.file_id = uploaded_file.name
@@ -160,30 +148,33 @@ if uploaded_file:
     v_mi, v_ma = float(df["v"].min()), float(df["v"].max())
     a_mi, a_ma = float(df["a"].min()), float(df["a"].max())
     f_mi, f_ma = float(df["F"].min()), float(df["F"].max())
-
     marker_times = [t1, t2]
+
+    # --- 数値表示を中央揃えにするための関数 ---
+    def centered_latex(label, value, unit):
+        st.markdown(f"<div style='text-align: center; font-size: 1.2em; margin-top: -10px;'>${label} = {value:.3f} \\, \\mathrm{{{unit}}}$</div>", unsafe_allow_html=True)
 
     r1c1, r1c2 = st.columns(2)
     with r1c1:
         st.image(create_graph_image(df.iloc[:time_idx+1], "t", "x", "t", "x", "s", "m", 'blue', 450, t_m, 0.0, x_m, markers=marker_times), channels="BGR")
-        st.latex(rf"x = {curr_row['x']:.3f} \,\, \mathrm{{m}}")
+        centered_latex("x", curr_row['x'], "m")
     with r1c2:
         st.image(create_graph_image(df.iloc[:time_idx+1], "t", "v", "t", "v", "s", "m/s", 'red', 450, t_m, v_mi, v_ma, markers=marker_times), channels="BGR")
-        st.latex(rf"v = {curr_row['v']:.3f} \,\, \mathrm{{m/s}}")
+        centered_latex("v", curr_row['v'], "m/s")
 
     r2c1, r2c2 = st.columns(2)
     with r2c1:
         st.image(create_graph_image(df.iloc[:time_idx+1], "t", "a", "t", "a", "s", "m/s²", 'green', 450, t_m, a_mi, a_ma, markers=marker_times), channels="BGR")
-        st.latex(rf"a = {curr_row['a']:.3f} \,\, \mathrm{{m/s^2}}")
+        centered_latex("a", curr_row['a'], "m/s^2")
     with r2c2:
         st.image(create_graph_image(df.iloc[:time_idx+1], "x", "F", "x", "F", "m", "N", 'purple', 450, x_m, f_mi, f_ma, shade_range=(t1, t2), markers=marker_times), channels="BGR")
-        st.latex(rf"F = {curr_row['F']:.3f} \,\, \mathrm{{N}}")
+        centered_latex("F", curr_row['F'], "N")
 
     st.divider()
     df_w = df[(df["t"] >= t1) & (df["t"] <= t2)]
     if len(df_w) > 1:
         w_val = np.trapz(df_w["F"], df_w["x"])
-        st.latex(rf"W = {format_sci_latex(w_val)} \,\, \mathrm{{J}}")
+        st.markdown(f"<div style='text-align: center; font-size: 1.5em;'>$W = {format_sci_latex(w_val)} \\, \\mathrm{{J}}$</div>", unsafe_allow_html=True)
 
     if st.button(f"🎥 解析動画を生成して保存"):
         meta = st.session_state.video_meta
@@ -192,63 +183,46 @@ if uploaded_file:
         header_h = v_size + 100
         font = cv2.FONT_HERSHEY_SIMPLEX
         
-        # --- 修正箇所 ---
         graph_configs = [
             {"xc": "t", "yc": "x", "xl": "t", "yl": "x", "xu": "s", "yu": "m", "col": "blue", "ymn": 0.0, "ymx": x_m, "xm": t_m},
             {"xc": "t", "yc": "v", "xl": "t", "yl": "v", "xu": "s", "yu": "m/s", "col": "red", "ymn": v_mi, "ymx": v_ma, "xm": t_m},
-            
-            # 【重要】
-            # yu: "m/s²" (元のまま。グラフ軸ラベル用。Matplotlibはこれで描画)
-            # yu_cv: "m/s^2" (新規追加。動画上の数値表示用。OpenCVの文字化け回避のためASCII文字を使用)
             {"xc": "t", "yc": "a", "xl": "t", "yl": "a", "xu": "s", "yu": "m/s²", "yu_cv": "m/s^2", "col": "green", "ymn": a_mi, "ymx": a_ma, "xm": t_m},
-            
             {"xc": "x", "yc": "F", "xl": "x", "yl": "F", "xu": "m", "yu": "N", "col": "purple", "ymn": f_mi, "ymx": f_ma, "xm": x_m}
         ]
-        # ----------------
 
         fourcc = cv2.VideoWriter_fourcc(*'mp4v')
         out = cv2.VideoWriter(final_path, fourcc, meta["fps"], (meta["w"], meta["h"] + header_h))
-        
         cap = cv2.VideoCapture(meta["path"])
-        p_bar = st.progress(0.0)
-        status_text = st.empty()
-        
+        p_bar = st.progress(0.0); status_text = st.empty()
         scale = meta.get("scale", 1.0)
 
         for i in range(len(df)):
             ret, frame_raw = cap.read()
             if not ret: break
-            
-            if scale < 1.0:
-                frame = cv2.resize(frame_raw, (meta["w"], meta["h"]))
-            else:
-                frame = frame_raw
-            
+            frame = cv2.resize(frame_raw, (meta["w"], meta["h"])) if scale < 1.0 else frame_raw
             canvas = np.zeros((meta["h"] + header_h, meta["w"], 3), dtype=np.uint8)
-            curr = df.iloc[i]
-            df_s = df.iloc[:i+1]
+            curr, df_s = df.iloc[i], df.iloc[:i+1]
             
             for idx, g in enumerate(graph_configs):
-                # グラフ描画: yu (m/s²) を使用 -> Matplotlibの軸ラベルは元のまま
                 g_img = create_graph_image(df_s, g["xc"], g["yc"], g["xl"], g["yl"], g["xu"], g["yu"], g["col"], v_size, g["xm"], g["ymn"], g["ymx"], shade_range=None, markers=None)
                 canvas[0:v_size, idx*v_size:(idx+1)*v_size] = g_img
                 
-                # --- 動画内のテキスト表示: yu_cv ("m/s^2") があれば優先使用 ---
                 disp_unit = g.get("yu_cv", g["yu"]) 
                 val_text = f"{g['yl']} = {curr[g['yc']]:>+7.3f} {disp_unit}"
-                # --------------------------------------------------------
                 
-                (tw, th), _ = cv2.getTextSize(val_text, font, 0.5, 1)
-                cv2.putText(canvas, val_text, (idx*v_size + (v_size-tw)//2, v_size + 50), font, 0.5, (255,255,255), 1, cv2.LINE_AA)
+                # --- 動画内のテキストサイズ調整 (0.5->0.7, 太さ1->2) ---
+                v_font_scale = 0.7
+                v_thickness = 2
+                (tw, th), _ = cv2.getTextSize(val_text, font, v_font_scale, v_thickness)
+                # 位置を +50 から +65 に微調整して重なりを回避
+                cv2.putText(canvas, val_text, (idx*v_size + (v_size-tw)//2, v_size + 65), font, v_font_scale, (255,255,255), v_thickness, cv2.LINE_AA)
             
             t_text = f"t = {curr['t']:.2f} s"
             cv2.putText(frame, t_text, (20, 40), font, 1.0, (255,255,255), 2, cv2.LINE_AA)
-            
             if not np.isnan(curr['gx']):
                 cv2.circle(frame, (int(curr['gx']), int(curr['gy'])), mask_size, (255,255,0), 2)
                 cv2.circle(frame, (int(curr['gx']), int(curr['gy'])), 5, (0,255,0), -1)
-                if not np.isnan(curr['bx']):
-                    cv2.circle(frame, (int(curr['bx']), int(curr['by'])), 5, (255,0,255), -1)
+                if not np.isnan(curr['bx']): cv2.circle(frame, (int(curr['bx']), int(curr['by'])), 5, (255,0,255), -1)
             
             canvas[header_h:, :] = frame
             out.write(canvas)
@@ -256,10 +230,7 @@ if uploaded_file:
                 p_bar.progress(i / len(df))
                 status_text.text(f"生成中: {i}/{len(df)} フレーム")
 
-        cap.release()
-        out.release()
-        p_bar.empty()
+        cap.release(); out.release(); p_bar.empty()
         status_text.success("✅ 動画生成が完了しました！")
-        
         with open(final_path, "rb") as f:
             st.download_button("💾 完成した動画をダウンロード", f, file_name=f"analysis_v{VERSION}.mp4")
