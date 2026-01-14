@@ -12,8 +12,9 @@ import os
 plt.switch_backend('Agg')
 plt.rcParams['mathtext.fontset'] = 'cm'
 RADIUS_M = 0.016
-VERSION = "2.6.6"
+VERSION = "2.6.7"
 MAX_DURATION = 10.0
+MAX_ANALYSIS_WIDTH = 1280  # 解析時の最大横幅（これを超えるとリサイズ）
 
 def format_sci_latex(val):
     try:
@@ -77,13 +78,33 @@ if uploaded_file:
         with st.spinner("最高精度エンジンで解析中..."):
             cap = cv2.VideoCapture(tfile_temp.name)
             fps = cap.get(cv2.CAP_PROP_FPS) or 30
-            w, h = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            
+            # --- 【修正】メモリ負荷軽減のためのリサイズ計算 ---
+            raw_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            raw_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            
+            scale_factor = 1.0
+            if raw_w > MAX_ANALYSIS_WIDTH:
+                scale_factor = MAX_ANALYSIS_WIDTH / raw_w
+            
+            w = int(raw_w * scale_factor)
+            h = int(raw_h * scale_factor)
+            # -----------------------------------------------
+
             data_log = []; total_angle, prev_angle = 0.0, None; last_valid_gx, last_valid_gy = np.nan, np.nan
             L_G, L_P = (np.array([35,50,50]), np.array([85,255,255])), (np.array([140,40,40]), np.array([180,255,255]))
             f_idx = 0
             while True:
-                ret, frame = cap.read()
+                ret, frame_raw = cap.read() # 生データを読み込み
                 if not ret: break
+                
+                # --- 【修正】必要に応じてリサイズ ---
+                if scale_factor < 1.0:
+                    frame = cv2.resize(frame_raw, (w, h))
+                else:
+                    frame = frame_raw
+                # ----------------------------------
+
                 hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
                 mask_g = cv2.inRange(hsv, L_G[0], L_G[1]); con_g, _ = cv2.findContours(mask_g, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
                 new_gx, new_gy = np.nan, np.nan
@@ -116,20 +137,22 @@ if uploaded_file:
             if len(df) > 31:
                 df["x"] = savgol_filter(df["x"], 15, 2); df["v"] = savgol_filter(df["x"].diff().fillna(0)*fps, 31, 2)
                 df["a"] = savgol_filter(df["v"].diff().fillna(0)*fps, 31, 2); df["F"] = mass_input * df["a"]
-            st.session_state.df = df; st.session_state.video_meta = {"fps": fps, "w": w, "h": h, "path": tfile_temp.name}; st.session_state.file_id = uploaded_file.name
+            
+            # --- メタデータにはリサイズ後のw, hを保存 ---
+            st.session_state.df = df; 
+            st.session_state.video_meta = {"fps": fps, "w": w, "h": h, "path": tfile_temp.name, "scale": scale_factor}
+            st.session_state.file_id = uploaded_file.name
 
     df = st.session_state.df
     st.sidebar.markdown("---")
     t_max_limit = float(df["t"].max())
     t1 = st.sidebar.number_input(r"開始時刻 $t_1$ [s]", 0.0, t_max_limit, 0.0, 0.01)
     row1 = df.iloc[(df['t']-t1).abs().argsort()[:1]]
-    # 【修正】markdownを使用して左揃えに
     st.sidebar.markdown(rf"$x_1 = {row1['x'].values[0]:.3f} \,\, \mathrm{{m}}$")
     st.sidebar.markdown(rf"$v_1 = {row1['v'].values[0]:.3f} \,\, \mathrm{{m/s}}$")
     st.sidebar.markdown("---")
     t2 = st.sidebar.number_input(r"終了時刻 $t_2$ [s]", 0.0, t_max_limit, t_max_limit, 0.01)
     row2 = df.iloc[(df['t']-t2).abs().argsort()[:1]]
-    # 【修正】markdownを使用して左揃えに
     st.sidebar.markdown(rf"$x_2 = {row2['x'].values[0]:.3f} \,\, \mathrm{{m}}$")
     st.sidebar.markdown(rf"$v_2 = {row2['v'].values[0]:.3f} \,\, \mathrm{{m/s}}$")
 
@@ -169,6 +192,7 @@ if uploaded_file:
     if st.button(f"🎥 解析動画を生成して保存"):
         meta = st.session_state.video_meta
         final_path = tempfile.NamedTemporaryFile(suffix='.mp4', delete=False).name
+        # リサイズ後の幅(w)を基準に動画を作成
         v_size = meta["w"] // 4
         header_h = v_size + 100
         font = cv2.FONT_HERSHEY_SIMPLEX
@@ -187,9 +211,19 @@ if uploaded_file:
         p_bar = st.progress(0.0)
         status_text = st.empty()
         
+        scale = meta.get("scale", 1.0)
+
         for i in range(len(df)):
-            ret, frame = cap.read()
+            ret, frame_raw = cap.read()
             if not ret: break
+            
+            # --- 動画生成時も同じサイズにリサイズ ---
+            if scale < 1.0:
+                frame = cv2.resize(frame_raw, (meta["w"], meta["h"]))
+            else:
+                frame = frame_raw
+            # --------------------------------------
+
             canvas = np.zeros((meta["h"] + header_h, meta["w"], 3), dtype=np.uint8)
             curr = df.iloc[i]
             df_s = df.iloc[:i+1]
