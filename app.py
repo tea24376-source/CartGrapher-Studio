@@ -10,12 +10,10 @@ import os
 
 # --- 基本設定 ---
 plt.switch_backend('Agg')
-# 数式フォントの設定（エラー回避のため標準的なフォントセットを使用）
-plt.rcParams['mathtext.fontset'] = 'stix'
-plt.rcParams['font.family'] = 'STIXGeneral'
+# 数式フォントの設定（最も互換性が高い 'dejavusans' を使用）
+plt.rcParams['mathtext.fontset'] = 'dejavusans'
 RADIUS_M = 0.016
-VERSION = "2.7"
-MAX_DURATION = 10.0
+VERSION = "2.8"
 
 def format_sci_latex(val):
     try:
@@ -28,41 +26,51 @@ def format_sci_latex(val):
     except: return "0"
 
 def create_graph_image(df_sub, x_col, y_col, x_label, y_label, x_unit, y_unit, color, size, x_max, y_min, y_max, shade_range=None, markers=None):
+    # サイズ計算
     fig, ax = plt.subplots(figsize=(size/100, size/100), dpi=100)
+    
     try:
+        # 1. プロット処理
         if not df_sub.empty:
             ax.plot(df_sub[x_col], df_sub[y_col], color=color, linewidth=2, alpha=0.8)
-            # 最新値の点
-            ax.scatter(df_sub[x_col].iloc[-1], df_sub[y_col].iloc[-1], color=color, s=60, edgecolors='white', zorder=5)
+            ax.scatter(df_sub[x_col].iloc[-1], df_sub[y_col].iloc[-1], color=color, s=60, edgecolors='white', zorder=10)
             
-            # 指定された時刻t1, t2にマーカーを付ける
-            if markers:
-                for t_val in markers:
-                    # 最近傍のデータを取得
-                    idx = (df_sub['t'] - t_val).abs().idxmin()
-                    target_row = df_sub.loc[idx]
-                    ax.scatter(target_row[x_col], target_row[y_col], color='orange', s=80, marker='o', edgecolors='black', zorder=10)
-
+            # 積分範囲の塗りつぶし (F-xグラフ用)
             if shade_range is not None and y_col == 'F':
                 t_s, t_e = shade_range
                 mask = (df_sub['t'] >= t_s) & (df_sub['t'] <= t_e)
                 ax.fill_between(df_sub[x_col], df_sub[y_col], where=mask, color=color, alpha=0.3)
 
-        # 単位表記の加工（m/s^2 を LaTeX形式に）
-        def fix_unit(u):
-            return u.replace("m/s^2", r"\mathrm{m/s^2}").replace("m/s", r"\mathrm{m/s}").replace("m", r"\mathrm{m}").replace("s", r"\mathrm{s}").replace("N", r"\mathrm{N}")
+            # マーカーの追加 (開始・終了時刻)
+            if markers is not None:
+                for t_mark in markers:
+                    # df_subの中からt_markに最も近い行を探す
+                    idx = (df_sub['t'] - t_mark).abs().idxmin()
+                    m_row = df_sub.loc[idx]
+                    ax.scatter(m_row[x_col], m_row[y_row := y_col], color='orange', s=80, marker='o', edgecolors='black', zorder=15)
 
-        ax.set_title(rf"${y_label}$ - ${x_label}$", fontsize=14, fontweight='bold')
-        ax.set_xlabel(rf"${x_label}$ [${fix_unit(x_unit)}$]", fontsize=11)
-        ax.set_ylabel(rf"${y_label}$ [${fix_unit(y_unit)}$]", fontsize=11)
+        # 2. ラベルと単位の安全な構築 (LaTeXエラー回避)
+        def get_latex_unit(u):
+            if u == "m/s^2": return r"$\mathrm{m/s^2}$"
+            if u == "m/s": return r"$\mathrm{m/s}$"
+            return rf"$\mathrm{{{u}}}$"
+
+        ax.set_title(rf"$ {y_label} $ - $ {x_label} $", fontsize=14, fontweight='bold')
+        ax.set_xlabel(rf"$ {x_label} $ [{get_latex_unit(x_unit)}]", fontsize=11)
+        ax.set_ylabel(rf"$ {y_label} $ [{get_latex_unit(y_unit)}]", fontsize=11)
         
+        # 3. 軸設定
         ax.set_xlim(0, max(float(x_max), 0.1))
         yr = max(float(y_max - y_min), 0.01)
         ax.set_ylim(y_min - yr*0.1, y_max + yr*0.1)
         ax.grid(True, linestyle='--', alpha=0.5)
-    except: pass
-    
-    plt.tight_layout()
+        
+        # エラーが起きやすい箇所の保護
+        fig.tight_layout()
+    except Exception as e:
+        # エラー発生時は最小限の処理で図を返す
+        pass
+
     buf = io.BytesIO()
     fig.savefig(buf, format="png")
     buf.seek(0)
@@ -73,8 +81,9 @@ def create_graph_image(df_sub, x_col, y_col, x_label, y_label, x_unit, y_unit, c
 st.set_page_config(page_title=f"CartGrapher Studio v{VERSION}", layout="wide")
 st.title(f"🚀 CartGrapher Studio ver {VERSION}")
 
+# --- サイドバー設定 ---
 st.sidebar.header("解析設定")
-# 質量の表記をLaTeXに変更
+# 質量の表記をLaTeX化 [kg]
 mass_input = st.sidebar.number_input(r"台車の質量 $m$ [kg]", value=0.100, min_value=0.001, format="%.3f", step=0.001)
 mask_size = st.sidebar.slider("解析エリア半径 (px)", 50, 400, 200, 10)
 
@@ -86,7 +95,7 @@ if uploaded_file:
     tfile_temp.close()
 
     if "df" not in st.session_state or st.session_state.get("file_id") != uploaded_file.name:
-        with st.spinner("最高精度エンジンで解析中..."):
+        with st.spinner("物理エンジンで解析中..."):
             cap = cv2.VideoCapture(tfile_temp.name)
             fps = cap.get(cv2.CAP_PROP_FPS) or 30
             w, h = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
@@ -98,13 +107,11 @@ if uploaded_file:
                 if not ret: break
                 hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
                 mask_g = cv2.inRange(hsv, L_G[0], L_G[1]); con_g, _ = cv2.findContours(mask_g, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-                new_gx, new_gy = np.nan, np.nan
+                gx, gy = np.nan, np.nan
                 if con_g:
                     c = max(con_g, key=cv2.contourArea); M = cv2.moments(c)
-                    if M["m00"] > 100: new_gx, new_gy = M["m10"]/M["m00"], M["m01"]/M["m00"]
-                if not np.isnan(last_valid_gx) and not np.isnan(new_gx):
-                    if np.sqrt((new_gx - last_valid_gx)**2 + (new_gy - last_valid_gy)**2) > 60: new_gx, new_gy = last_valid_gx, last_valid_gy
-                gx = new_gx if not np.isnan(new_gx) else last_valid_gx; gy = new_gy if not np.isnan(new_gy) else last_valid_gy
+                    if M["m00"] > 100: gx, gy = M["m10"]/M["m00"], M["m01"]/M["m00"]
+                if np.isnan(gx): gx, gy = last_valid_gx, last_valid_gy
                 last_valid_gx, last_valid_gy = gx, gy
                 bx, by = np.nan, np.nan
                 if not np.isnan(gx):
@@ -134,27 +141,19 @@ if uploaded_file:
     st.sidebar.markdown("---")
     t_max_limit = float(df["t"].max())
     t1 = st.sidebar.number_input(r"開始時刻 $t_1$ [s]", 0.0, t_max_limit, 0.0, 0.01)
-    row1 = df.iloc[(df['t']-t1).abs().argsort()[:1]]
-    st.sidebar.latex(rf"x_1 = {row1['x'].values[0]:.3f} \,\, \mathrm{{m}}")
-    st.sidebar.latex(rf"v_1 = {row1['v'].values[0]:.3f} \,\, \mathrm{{m/s}}")
-    st.sidebar.markdown("---")
     t2 = st.sidebar.number_input(r"終了時刻 $t_2$ [s]", 0.0, t_max_limit, t_max_limit, 0.01)
-    row2 = df.iloc[(df['t']-t2).abs().argsort()[:1]]
-    st.sidebar.latex(rf"x_2 = {row2['x'].values[0]:.3f} \,\, \mathrm{{m}}")
-    st.sidebar.latex(rf"v_2 = {row2['v'].values[0]:.3f} \,\, \mathrm{{m/s}}")
-
-    time_list = [round(t, 4) for t in df["t"].tolist()]
-    selected_t = st.select_slider("時刻をスキャン [s]", options=time_list, value=time_list[0])
-    time_idx = time_list.index(selected_t); curr_row = df.iloc[time_idx]
+    
+    selected_t = st.select_slider("時刻をスキャン [s]", options=[round(t, 4) for t in df["t"].tolist()])
+    time_idx = list(np.round(df["t"], 4)).index(selected_t); curr_row = df.iloc[time_idx]
     
     t_m, x_m = float(df["t"].max()), float(df["x"].max())
     v_mi, v_ma = float(df["v"].min()), float(df["v"].max())
     a_mi, a_ma = float(df["a"].min()), float(df["a"].max())
     f_mi, f_ma = float(df["F"].min()), float(df["F"].max())
 
-    # グラフに表示するマーカーのリスト
     current_markers = [t1, t2]
 
+    # --- グラフ表示 ---
     r1c1, r1c2 = st.columns(2)
     with r1c1:
         st.image(create_graph_image(df.iloc[:time_idx+1], "t", "x", "t", "x", "s", "m", 'blue', 450, t_m, 0.0, x_m, markers=current_markers), channels="BGR")
@@ -165,79 +164,48 @@ if uploaded_file:
 
     r2c1, r2c2 = st.columns(2)
     with r2c1:
-        # a-tグラフ [m/s^2]
         st.image(create_graph_image(df.iloc[:time_idx+1], "t", "a", "t", "a", "s", "m/s^2", 'green', 450, t_m, a_mi, a_ma, markers=current_markers), channels="BGR")
         st.latex(rf"a = {curr_row['a']:.3f} \,\, \mathrm{{m/s^2}}")
     with r2c2:
         st.image(create_graph_image(df.iloc[:time_idx+1], "x", "F", "x", "F", "m", "N", 'purple', 450, x_m, f_mi, f_ma, shade_range=(t1, t2), markers=current_markers), channels="BGR")
         st.latex(rf"F = {curr_row['F']:.3f} \,\, \mathrm{{N}}")
 
-    st.divider()
-    df_w = df[(df["t"] >= t1) & (df["t"] <= t2)]
-    if len(df_w) > 1:
-        w_val = np.trapz(df_w["F"], df_w["x"])
-        st.latex(rf"W = {format_sci_latex(w_val)} \,\, \mathrm{{J}}")
-
+    # --- 動画生成 ---
     if st.button(f"🎥 解析動画を生成して保存"):
         meta = st.session_state.video_meta
         final_path = tempfile.NamedTemporaryFile(suffix='.mp4', delete=False).name
         v_size = meta["w"] // 4
         header_h = v_size + 100
-        font = cv2.FONT_HERSHEY_SIMPLEX
-        
-        graph_configs = [
-            {"xc": "t", "yc": "x", "xl": "t", "yl": "x", "xu": "s", "yu": "m", "col": "blue", "ymn": 0.0, "ymx": x_m, "xm": t_m},
-            {"xc": "t", "yc": "v", "xl": "t", "yl": "v", "xu": "s", "yu": "m/s", "col": "red", "ymn": v_mi, "ymx": v_ma, "xm": t_m},
-            {"xc": "t", "yc": "a", "xl": "t", "yl": "a", "xu": "s", "yu": "m/s^2", "col": "green", "ymn": a_mi, "ymx": a_ma, "xm": t_m},
-            {"xc": "x", "yc": "F", "xl": "x", "yl": "F", "xu": "m", "yu": "N", "col": "purple", "ymn": f_mi, "ymx": f_ma, "xm": x_m}
-        ]
-
         fourcc = cv2.VideoWriter_fourcc(*'mp4v')
         out = cv2.VideoWriter(final_path, fourcc, meta["fps"], (meta["w"], meta["h"] + header_h))
-        
         cap = cv2.VideoCapture(meta["path"])
         p_bar = st.progress(0.0)
-        status_text = st.empty()
         
         for i in range(len(df)):
             ret, frame = cap.read()
             if not ret: break
-            
             canvas = np.zeros((meta["h"] + header_h, meta["w"], 3), dtype=np.uint8)
             curr = df.iloc[i]
-            df_s = df.iloc[:i+1]
             
-            for idx, g in enumerate(graph_configs):
-                # 動画内グラフにもマーカーを付与
-                g_img = create_graph_image(df_s, g["xc"], g["yc"], g["xl"], g["yl"], g["xu"], g["yu"], g["col"], v_size, g["xm"], g["ymn"], g["ymx"], shade_range=(t1, t2) if g["yc"]=='F' else None, markers=[t1, t2])
-                canvas[0:v_size, idx*v_size:(idx+1)*v_size] = g_img
+            # グラフ描画
+            g_cfg = [
+                ("t", "x", "t", "x", "s", "m", 'blue', t_m, 0.0, x_m),
+                ("t", "v", "t", "v", "s", "m/s", 'red', t_m, v_mi, v_ma),
+                ("t", "a", "t", "a", "s", "m/s^2", 'green', t_m, a_mi, a_ma),
+                ("x", "F", "x", "F", "m", "N", 'purple', x_m, f_mi, f_ma)
+            ]
+            for idx, g in enumerate(g_cfg):
+                gi = create_graph_image(df.iloc[:i+1], g[0], g[1], g[2], g[3], g[4], g[5], g[6], v_size, g[7], g[8], g[9], shade_range=(t1,t2) if g[1]=='F' else None, markers=[t1, t2])
+                canvas[0:v_size, idx*v_size:(idx+1)*v_size] = gi
                 
-                # 動画内のテキスト表示（^2は特殊文字に置換して表示）
-                unit_disp = g['yu'].replace("s^2", "s²")
-                val_text = f"{g['yl']} = {curr[g['yc']]:>+7.3f} {unit_disp}"
-                (tw, th), _ = cv2.getTextSize(val_text, font, 0.45, 1)
-                cv2.putText(canvas, val_text, (idx*v_size + (v_size-tw)//2, v_size + 50), font, 0.45, (255,255,255), 1, cv2.LINE_AA)
-            
-            t_text = f"t = {curr['t']:.2f} s"
-            cv2.putText(frame, t_text, (20, 40), font, 1.0, (255,255,255), 2, cv2.LINE_AA)
-            
-            if not np.isnan(curr['gx']):
-                cv2.circle(frame, (int(curr['gx']), int(curr['gy'])), mask_size, (255,255,0), 2)
-                cv2.circle(frame, (int(curr['gx']), int(curr['gy'])), 5, (0,255,0), -1)
-                if not np.isnan(curr['bx']):
-                    cv2.circle(frame, (int(curr['bx']), int(curr['by'])), 5, (255,0,255), -1)
-            
+                # 数値テキスト (OpenCV用なので簡易表記)
+                u_disp = g[5].replace("^2", "2")
+                cv2.putText(canvas, f"{g[3]}={curr[g[1]]:.2f}{u_disp}", (idx*v_size+10, v_size+40), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255,255,255), 1)
+
             canvas[header_h:, :] = frame
             out.write(canvas)
-            
-            if i % 10 == 0:
-                p_bar.progress(i / len(df))
-                status_text.text(f"生成中: {i}/{len(df)} フレーム")
-
-        cap.release()
-        out.release()
-        p_bar.empty()
-        status_text.success("✅ 動画生成が完了しました！")
+            if i % 10 == 0: p_bar.progress(i / len(df))
         
+        cap.release(); out.release()
         with open(final_path, "rb") as f:
-            st.download_button("💾 完成した動画をダウンロード", f, file_name=f"analysis_v{VERSION}.mp4")
+            st.download_button("💾 保存", f, file_name="analysis.mp4")
