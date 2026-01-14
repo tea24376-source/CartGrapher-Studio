@@ -12,7 +12,7 @@ import os
 plt.switch_backend('Agg')
 plt.rcParams['mathtext.fontset'] = 'cm'
 RADIUS_M = 0.016
-VERSION = "2.6.5"
+VERSION = "2.6.6"
 MAX_DURATION = 10.0
 
 def format_sci_latex(val):
@@ -123,13 +123,15 @@ if uploaded_file:
     t_max_limit = float(df["t"].max())
     t1 = st.sidebar.number_input(r"開始時刻 $t_1$ [s]", 0.0, t_max_limit, 0.0, 0.01)
     row1 = df.iloc[(df['t']-t1).abs().argsort()[:1]]
-    st.sidebar.latex(rf"x_1 = {row1['x'].values[0]:.3f} \,\, \mathrm{{m}}")
-    st.sidebar.latex(rf"v_1 = {row1['v'].values[0]:.3f} \,\, \mathrm{{m/s}}")
+    # 【修正】markdownを使用して左揃えに
+    st.sidebar.markdown(rf"$x_1 = {row1['x'].values[0]:.3f} \,\, \mathrm{{m}}$")
+    st.sidebar.markdown(rf"$v_1 = {row1['v'].values[0]:.3f} \,\, \mathrm{{m/s}}$")
     st.sidebar.markdown("---")
     t2 = st.sidebar.number_input(r"終了時刻 $t_2$ [s]", 0.0, t_max_limit, t_max_limit, 0.01)
     row2 = df.iloc[(df['t']-t2).abs().argsort()[:1]]
-    st.sidebar.latex(rf"x_2 = {row2['x'].values[0]:.3f} \,\, \mathrm{{m}}")
-    st.sidebar.latex(rf"v_2 = {row2['v'].values[0]:.3f} \,\, \mathrm{{m/s}}")
+    # 【修正】markdownを使用して左揃えに
+    st.sidebar.markdown(rf"$x_2 = {row2['x'].values[0]:.3f} \,\, \mathrm{{m}}$")
+    st.sidebar.markdown(rf"$v_2 = {row2['v'].values[0]:.3f} \,\, \mathrm{{m/s}}$")
 
     time_list = [round(t, 4) for t in df["t"].tolist()]
     selected_t = st.select_slider("時刻をスキャン [s]", options=time_list, value=time_list[0])
@@ -152,7 +154,6 @@ if uploaded_file:
 
     r2c1, r2c2 = st.columns(2)
     with r2c1:
-        # 【修正】単位を m/s² に変更
         st.image(create_graph_image(df.iloc[:time_idx+1], "t", "a", "t", "a", "s", "m/s²", 'green', 450, t_m, a_mi, a_ma, markers=marker_times), channels="BGR")
         st.latex(rf"a = {curr_row['a']:.3f} \,\, \mathrm{{m/s^2}}")
     with r2c2:
@@ -175,7 +176,6 @@ if uploaded_file:
         graph_configs = [
             {"xc": "t", "yc": "x", "xl": "t", "yl": "x", "xu": "s", "yu": "m", "col": "blue", "ymn": 0.0, "ymx": x_m, "xm": t_m},
             {"xc": "t", "yc": "v", "xl": "t", "yl": "v", "xu": "s", "yu": "m/s", "col": "red", "ymn": v_mi, "ymx": v_ma, "xm": t_m},
-            # 【修正】動画内設定でも単位を m/s² に変更
             {"xc": "t", "yc": "a", "xl": "t", "yl": "a", "xu": "s", "yu": "m/s²", "col": "green", "ymn": a_mi, "ymx": a_ma, "xm": t_m},
             {"xc": "x", "yc": "F", "xl": "x", "yl": "F", "xu": "m", "yu": "N", "col": "purple", "ymn": f_mi, "ymx": f_ma, "xm": x_m}
         ]
@@ -197,7 +197,6 @@ if uploaded_file:
             for idx, g in enumerate(graph_configs):
                 g_img = create_graph_image(df_s, g["xc"], g["yc"], g["xl"], g["yl"], g["xu"], g["yu"], g["col"], v_size, g["xm"], g["ymn"], g["ymx"], shade_range=None, markers=None)
                 canvas[0:v_size, idx*v_size:(idx+1)*v_size] = g_img
-                # OpenCVの数値表示テキスト
                 val_text = f"{g['yl']} = {curr[g['yc']]:>+7.3f} {g['yu']}"
                 (tw, th), _ = cv2.getTextSize(val_text, font, 0.5, 1)
                 cv2.putText(canvas, val_text, (idx*v_size + (v_size-tw)//2, v_size + 50), font, 0.5, (255,255,255), 1, cv2.LINE_AA)
