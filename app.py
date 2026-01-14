@@ -12,9 +12,9 @@ import os
 plt.switch_backend('Agg')
 plt.rcParams['mathtext.fontset'] = 'cm'
 RADIUS_M = 0.016
-VERSION = "2.6.7"
+VERSION = "2.6.8"
 MAX_DURATION = 10.0
-MAX_ANALYSIS_WIDTH = 1280  # 解析時の最大横幅（これを超えるとリサイズ）
+MAX_ANALYSIS_WIDTH = 1280  # 解析時の最大横幅
 
 def format_sci_latex(val):
     try:
@@ -79,7 +79,6 @@ if uploaded_file:
             cap = cv2.VideoCapture(tfile_temp.name)
             fps = cap.get(cv2.CAP_PROP_FPS) or 30
             
-            # --- 【修正】メモリ負荷軽減のためのリサイズ計算 ---
             raw_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
             raw_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
             
@@ -89,21 +88,18 @@ if uploaded_file:
             
             w = int(raw_w * scale_factor)
             h = int(raw_h * scale_factor)
-            # -----------------------------------------------
 
             data_log = []; total_angle, prev_angle = 0.0, None; last_valid_gx, last_valid_gy = np.nan, np.nan
             L_G, L_P = (np.array([35,50,50]), np.array([85,255,255])), (np.array([140,40,40]), np.array([180,255,255]))
             f_idx = 0
             while True:
-                ret, frame_raw = cap.read() # 生データを読み込み
+                ret, frame_raw = cap.read()
                 if not ret: break
                 
-                # --- 【修正】必要に応じてリサイズ ---
                 if scale_factor < 1.0:
                     frame = cv2.resize(frame_raw, (w, h))
                 else:
                     frame = frame_raw
-                # ----------------------------------
 
                 hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
                 mask_g = cv2.inRange(hsv, L_G[0], L_G[1]); con_g, _ = cv2.findContours(mask_g, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -138,7 +134,6 @@ if uploaded_file:
                 df["x"] = savgol_filter(df["x"], 15, 2); df["v"] = savgol_filter(df["x"].diff().fillna(0)*fps, 31, 2)
                 df["a"] = savgol_filter(df["v"].diff().fillna(0)*fps, 31, 2); df["F"] = mass_input * df["a"]
             
-            # --- メタデータにはリサイズ後のw, hを保存 ---
             st.session_state.df = df; 
             st.session_state.video_meta = {"fps": fps, "w": w, "h": h, "path": tfile_temp.name, "scale": scale_factor}
             st.session_state.file_id = uploaded_file.name
@@ -192,68 +187,10 @@ if uploaded_file:
     if st.button(f"🎥 解析動画を生成して保存"):
         meta = st.session_state.video_meta
         final_path = tempfile.NamedTemporaryFile(suffix='.mp4', delete=False).name
-        # リサイズ後の幅(w)を基準に動画を作成
         v_size = meta["w"] // 4
         header_h = v_size + 100
         font = cv2.FONT_HERSHEY_SIMPLEX
         
         graph_configs = [
             {"xc": "t", "yc": "x", "xl": "t", "yl": "x", "xu": "s", "yu": "m", "col": "blue", "ymn": 0.0, "ymx": x_m, "xm": t_m},
-            {"xc": "t", "yc": "v", "xl": "t", "yl": "v", "xu": "s", "yu": "m/s", "col": "red", "ymn": v_mi, "ymx": v_ma, "xm": t_m},
-            {"xc": "t", "yc": "a", "xl": "t", "yl": "a", "xu": "s", "yu": "m/s²", "col": "green", "ymn": a_mi, "ymx": a_ma, "xm": t_m},
-            {"xc": "x", "yc": "F", "xl": "x", "yl": "F", "xu": "m", "yu": "N", "col": "purple", "ymn": f_mi, "ymx": f_ma, "xm": x_m}
-        ]
-
-        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-        out = cv2.VideoWriter(final_path, fourcc, meta["fps"], (meta["w"], meta["h"] + header_h))
-        
-        cap = cv2.VideoCapture(meta["path"])
-        p_bar = st.progress(0.0)
-        status_text = st.empty()
-        
-        scale = meta.get("scale", 1.0)
-
-        for i in range(len(df)):
-            ret, frame_raw = cap.read()
-            if not ret: break
-            
-            # --- 動画生成時も同じサイズにリサイズ ---
-            if scale < 1.0:
-                frame = cv2.resize(frame_raw, (meta["w"], meta["h"]))
-            else:
-                frame = frame_raw
-            # --------------------------------------
-
-            canvas = np.zeros((meta["h"] + header_h, meta["w"], 3), dtype=np.uint8)
-            curr = df.iloc[i]
-            df_s = df.iloc[:i+1]
-            
-            for idx, g in enumerate(graph_configs):
-                g_img = create_graph_image(df_s, g["xc"], g["yc"], g["xl"], g["yl"], g["xu"], g["yu"], g["col"], v_size, g["xm"], g["ymn"], g["ymx"], shade_range=None, markers=None)
-                canvas[0:v_size, idx*v_size:(idx+1)*v_size] = g_img
-                val_text = f"{g['yl']} = {curr[g['yc']]:>+7.3f} {g['yu']}"
-                (tw, th), _ = cv2.getTextSize(val_text, font, 0.5, 1)
-                cv2.putText(canvas, val_text, (idx*v_size + (v_size-tw)//2, v_size + 50), font, 0.5, (255,255,255), 1, cv2.LINE_AA)
-            
-            t_text = f"t = {curr['t']:.2f} s"
-            cv2.putText(frame, t_text, (20, 40), font, 1.0, (255,255,255), 2, cv2.LINE_AA)
-            
-            if not np.isnan(curr['gx']):
-                cv2.circle(frame, (int(curr['gx']), int(curr['gy'])), mask_size, (255,255,0), 2)
-                cv2.circle(frame, (int(curr['gx']), int(curr['gy'])), 5, (0,255,0), -1)
-                if not np.isnan(curr['bx']):
-                    cv2.circle(frame, (int(curr['bx']), int(curr['by'])), 5, (255,0,255), -1)
-            
-            canvas[header_h:, :] = frame
-            out.write(canvas)
-            if i % 10 == 0:
-                p_bar.progress(i / len(df))
-                status_text.text(f"生成中: {i}/{len(df)} フレーム")
-
-        cap.release()
-        out.release()
-        p_bar.empty()
-        status_text.success("✅ 動画生成が完了しました！")
-        
-        with open(final_path, "rb") as f:
-            st.download_button("💾 完成した動画をダウンロード", f, file_name=f"analysis_v{VERSION}.mp4")
+            {"xc": "t", "yc": "v", "xl": "t", "yl": "v", "xu": "s", "yu": "m/s", "col": "red", "ymn": v_mi, "ym
