@@ -12,7 +12,7 @@ import os
 plt.switch_backend('Agg')
 plt.rcParams['mathtext.fontset'] = 'cm'
 RADIUS_M = 0.016
-VERSION = "2.6.1"
+VERSION = "2.6.2"
 MAX_DURATION = 10.0
 
 def format_sci_latex(val):
@@ -25,23 +25,16 @@ def format_sci_latex(val):
         return rf"{base} \times 10^{{{exp_int}}}"
     except: return "0"
 
-# 引数に markers を追加
-def create_graph_image(df_sub, x_col, y_col, x_label, y_label, x_unit, y_unit, color, size, x_max, y_min, y_max, shade_range=None, markers=None):
+# マーカー描画機能を削除
+def create_graph_image(df_sub, x_col, y_col, x_label, y_label, x_unit, y_unit, color, size, x_max, y_min, y_max, shade_range=None):
     fig, ax = plt.subplots(figsize=(size/100, size/100), dpi=100)
     try:
         if not df_sub.empty:
             ax.plot(df_sub[x_col], df_sub[y_col], color=color, linewidth=2, alpha=0.8)
-            # 現在値のドット
+            # 現在値のドット（これだけ残します）
             ax.scatter(df_sub[x_col].iloc[-1], df_sub[y_col].iloc[-1], color=color, s=60, edgecolors='white', zorder=5)
             
-            # 【追加】指定時刻にマーカー（オレンジ色の点）を打つ
-            if markers is not None:
-                for t_val in markers:
-                    # 全データから該当時刻に最も近い行を特定（描画中の範囲外でもエラーにならないよう考慮）
-                    # 描画対象のデータフレームから探す
-                    m_row = df_sub.iloc[(df_sub['t']-t_val).abs().argsort()[:1]]
-                    if not m_row.empty:
-                        ax.scatter(m_row[x_col], m_row[y_col], color='orange', s=50, marker='o', edgecolors='black', zorder=10)
+            # 【削除】オレンジマーカーの描画ループを削除しました
 
             if shade_range is not None and y_col == 'F':
                 t_s, t_e = shade_range
@@ -145,23 +138,21 @@ if uploaded_file:
     a_mi, a_ma = float(df["a"].min()), float(df["a"].max())
     f_mi, f_ma = float(df["F"].min()), float(df["F"].max())
 
-    # マーカーとして渡すリスト
-    marker_times = [t1, t2]
-
+    # --- 右側のグラフ表示（Web画面上は積分部分に色をつけ、マーカーは無し） ---
     r1c1, r1c2 = st.columns(2)
     with r1c1:
-        st.image(create_graph_image(df.iloc[:time_idx+1], "t", "x", "t", "x", "s", "m", 'blue', 450, t_m, 0.0, x_m, markers=marker_times), channels="BGR")
+        st.image(create_graph_image(df.iloc[:time_idx+1], "t", "x", "t", "x", "s", "m", 'blue', 450, t_m, 0.0, x_m), channels="BGR")
         st.latex(rf"x = {curr_row['x']:.3f} \,\, \mathrm{{m}}")
     with r1c2:
-        st.image(create_graph_image(df.iloc[:time_idx+1], "t", "v", "t", "v", "s", "m/s", 'red', 450, t_m, v_mi, v_ma, markers=marker_times), channels="BGR")
+        st.image(create_graph_image(df.iloc[:time_idx+1], "t", "v", "t", "v", "s", "m/s", 'red', 450, t_m, v_mi, v_ma), channels="BGR")
         st.latex(rf"v = {curr_row['v']:.3f} \,\, \mathrm{{m/s}}")
 
     r2c1, r2c2 = st.columns(2)
     with r2c1:
-        st.image(create_graph_image(df.iloc[:time_idx+1], "t", "a", "t", "a", "s", "m/s^2", 'green', 450, t_m, a_mi, a_ma, markers=marker_times), channels="BGR")
+        st.image(create_graph_image(df.iloc[:time_idx+1], "t", "a", "t", "a", "s", "m/s^2", 'green', 450, t_m, a_mi, a_ma), channels="BGR")
         st.latex(rf"a = {curr_row['a']:.3f} \,\, \mathrm{{m/s^2}}")
     with r2c2:
-        st.image(create_graph_image(df.iloc[:time_idx+1], "x", "F", "x", "F", "m", "N", 'purple', 450, x_m, f_mi, f_ma, shade_range=(t1, t2), markers=marker_times), channels="BGR")
+        st.image(create_graph_image(df.iloc[:time_idx+1], "x", "F", "x", "F", "m", "N", 'purple', 450, x_m, f_mi, f_ma, shade_range=(t1, t2)), channels="BGR")
         st.latex(rf"F = {curr_row['F']:.3f} \,\, \mathrm{{N}}")
 
     st.divider()
@@ -199,8 +190,8 @@ if uploaded_file:
             df_s = df.iloc[:i+1]
             
             for idx, g in enumerate(graph_configs):
-                # 動画内グラフにもマーカーを表示
-                g_img = create_graph_image(df_s, g["xc"], g["yc"], g["xl"], g["yl"], g["xu"], g["yu"], g["col"], v_size, g["xm"], g["ymn"], g["ymx"], shade_range=(t1, t2) if g["yc"]=="F" else None, markers=marker_times)
+                # 【修正点】動画内では shade_range=None とし、塗りつぶしを行わない
+                g_img = create_graph_image(df_s, g["xc"], g["yc"], g["xl"], g["yl"], g["xu"], g["yu"], g["col"], v_size, g["xm"], g["ymn"], g["ymx"], shade_range=None)
                 canvas[0:v_size, idx*v_size:(idx+1)*v_size] = g_img
                 val_text = f"{g['yl']} = {curr[g['yc']]:>+7.3f} {g['yu']}"
                 (tw, th), _ = cv2.getTextSize(val_text, font, 0.5, 1)
@@ -226,5 +217,7 @@ if uploaded_file:
         p_bar.empty()
         status_text.success("✅ 動画生成が完了しました！")
         
+        with open(final_path, "rb") as f:
+            st.download_button("💾 完成した動画をダウンロード", f, file_name=f"analysis_v{VERSION}.mp4")
         with open(final_path, "rb") as f:
             st.download_button("💾 完成した動画をダウンロード", f, file_name=f"analysis_v{VERSION}.mp4")
