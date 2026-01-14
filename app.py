@@ -12,7 +12,7 @@ import os
 plt.switch_backend('Agg')
 plt.rcParams['mathtext.fontset'] = 'cm'
 RADIUS_M = 0.016
-VERSION = "2.6.3"
+VERSION = "2.6.4"
 MAX_DURATION = 10.0
 
 def format_sci_latex(val):
@@ -30,18 +30,19 @@ def create_graph_image(df_sub, x_col, y_col, x_label, y_label, x_unit, y_unit, c
     fig, ax = plt.subplots(figsize=(size/100, size/100), dpi=100)
     try:
         if not df_sub.empty:
+            # 軌跡の描画
             ax.plot(df_sub[x_col], df_sub[y_col], color=color, linewidth=2, alpha=0.8)
-            # 現在値のドット
+            # 【維持】現在値のドット（その時刻におけるマーカー）
             ax.scatter(df_sub[x_col].iloc[-1], df_sub[y_col].iloc[-1], color=color, s=60, edgecolors='white', zorder=5)
             
-            # 【維持】オレンジマーカー（開始・終了時刻）のプロット
+            # オレンジマーカー（開始・終了時刻）のプロット（markers引数がある場合のみ）
             if markers is not None:
                 for t_val in markers:
                     m_row = df_sub.iloc[(df_sub['t']-t_val).abs().argsort()[:1]]
                     if not m_row.empty:
                         ax.scatter(m_row[x_col], m_row[y_col], color='orange', s=50, marker='o', edgecolors='black', zorder=10)
 
-            # 塗りつぶし処理（引数が渡された時のみ実行）
+            # 塗りつぶし処理（shade_range引数がある場合のみ）
             if shade_range is not None and y_col == 'F':
                 t_s, t_e = shade_range
                 mask = (df_sub['t'] >= t_s) & (df_sub['t'] <= t_e)
@@ -149,6 +150,7 @@ if uploaded_file:
 
     r1c1, r1c2 = st.columns(2)
     with r1c1:
+        # ウェブ画面：markers=marker_times を渡してオレンジ点を表示
         st.image(create_graph_image(df.iloc[:time_idx+1], "t", "x", "t", "x", "s", "m", 'blue', 450, t_m, 0.0, x_m, markers=marker_times), channels="BGR")
         st.latex(rf"x = {curr_row['x']:.3f} \,\, \mathrm{{m}}")
     with r1c2:
@@ -160,7 +162,7 @@ if uploaded_file:
         st.image(create_graph_image(df.iloc[:time_idx+1], "t", "a", "t", "a", "s", "m/s^2", 'green', 450, t_m, a_mi, a_ma, markers=marker_times), channels="BGR")
         st.latex(rf"a = {curr_row['a']:.3f} \,\, \mathrm{{m/s^2}}")
     with r2c2:
-        # ウェブ画面では塗りつぶし(shade_range)を表示
+        # ウェブ画面：塗りつぶし(shade_range)とマーカー(markers)両方を表示
         st.image(create_graph_image(df.iloc[:time_idx+1], "x", "F", "x", "F", "m", "N", 'purple', 450, x_m, f_mi, f_ma, shade_range=(t1, t2), markers=marker_times), channels="BGR")
         st.latex(rf"F = {curr_row['F']:.3f} \,\, \mathrm{{N}}")
 
@@ -199,9 +201,9 @@ if uploaded_file:
             df_s = df.iloc[:i+1]
             
             for idx, g in enumerate(graph_configs):
-                # 【ポイント】動画内でも markers=marker_times を渡してオレンジ点を表示
-                # ただし shade_range=None にして塗りつぶしは行わない
-                g_img = create_graph_image(df_s, g["xc"], g["yc"], g["xl"], g["yl"], g["xu"], g["yu"], g["col"], v_size, g["xm"], g["ymn"], g["ymx"], shade_range=None, markers=marker_times)
+                # 【修正点】動画内では markers=None を渡してオレンジ点を非表示にする
+                # shade_range=None で塗りつぶしも非表示にする
+                g_img = create_graph_image(df_s, g["xc"], g["yc"], g["xl"], g["yl"], g["xu"], g["yu"], g["col"], v_size, g["xm"], g["ymn"], g["ymx"], shade_range=None, markers=None)
                 canvas[0:v_size, idx*v_size:(idx+1)*v_size] = g_img
                 val_text = f"{g['yl']} = {curr[g['yc']]:>+7.3f} {g['yu']}"
                 (tw, th), _ = cv2.getTextSize(val_text, font, 0.5, 1)
