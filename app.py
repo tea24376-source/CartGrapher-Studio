@@ -10,9 +10,10 @@ import os
 
 # --- 基本設定 ---
 plt.switch_backend('Agg')
-plt.rcParams['mathtext.fontset'] = 'cm'
+# mathtextの設定をより安定した 'dejavusans' に変更
+plt.rcParams['mathtext.fontset'] = 'dejavusans'
 RADIUS_M = 0.016
-VERSION = "2.7"
+VERSION = "2.8"
 MAX_DURATION = 10.0
 
 def format_sci_latex(val):
@@ -26,41 +27,44 @@ def format_sci_latex(val):
     except: return "0"
 
 def create_graph_image(df_sub, x_col, y_col, x_label, y_label, x_unit, y_unit, color, size, x_max, y_min, y_max, shade_range=None, markers=None):
+    # サイズ計算
     fig, ax = plt.subplots(figsize=(size/100, size/100), dpi=100)
     try:
-        # メイン曲線
         if not df_sub.empty:
             ax.plot(df_sub[x_col], df_sub[y_col], color=color, linewidth=2, alpha=0.8)
-            # 現在地点のポインター
             ax.scatter(df_sub[x_col].iloc[-1], df_sub[y_col].iloc[-1], color=color, s=60, edgecolors='white', zorder=10)
             
-            # F-xグラフの塗りつぶし
             if shade_range is not None and y_col == 'F':
                 t_s, t_e = shade_range
                 mask = (df_sub['t'] >= t_s) & (df_sub['t'] <= t_e)
                 ax.fill_between(df_sub[x_col], df_sub[y_col], where=mask, color=color, alpha=0.3)
 
-            # 積分区間マーカー (t1, t2)
             if markers is not None:
                 for t_mark in markers:
-                    # 時間軸に対する値を検索
                     m_row = df_sub.iloc[(df_sub['t']-t_mark).abs().argsort()[:1]]
                     if not m_row.empty:
                         ax.scatter(m_row[x_col], m_row[y_col], color='orange', s=40, marker='o', edgecolors='black', zorder=15)
 
-        # 単位の2乗表記をLaTeXで処理
-        y_unit_tex = y_unit.replace("m/s^2", r"\mathrm{m/s^2}").replace("m/s", r"\mathrm{m/s}").replace("m", r"\mathrm{m}").replace("N", r"\mathrm{N}")
-        x_unit_tex = x_unit.replace("s", r"\mathrm{s}").replace("m", r"\mathrm{m}")
+        # 単位表記の安全な変換 (Matplotlib用)
+        # ^2 を LaTeXの上付きに変換。それ以外は標準テキストとして扱う
+        y_unit_safe = y_unit.replace("^2", "$^2$")
+        x_unit_safe = x_unit.replace("^2", "$^2$")
 
-        ax.set_title(rf"${y_label}$ - ${x_label}$", fontsize=14, fontweight='bold')
-        ax.set_xlabel(rf"${x_label}$ [${x_unit_tex}$]", fontsize=11)
-        ax.set_ylabel(rf"${y_label}$ [${y_unit_tex}$]", fontsize=11)
+        ax.set_title(f"{y_label} - {x_label}", fontsize=14, fontweight='bold')
+        ax.set_xlabel(f"{x_label} [{x_unit_safe}]", fontsize=11)
+        ax.set_ylabel(f"{y_label} [{y_unit_safe}]", fontsize=11)
+        
         ax.set_xlim(0, max(float(x_max), 0.1))
         yr = max(float(y_max - y_min), 0.01)
         ax.set_ylim(y_min - yr*0.1, y_max + yr*0.1)
         ax.grid(True, linestyle='--', alpha=0.5)
-    except: pass
-    plt.tight_layout()
+        
+        # tight_layoutの前に数式エラーを避けるための微調整
+        plt.tight_layout()
+    except Exception as e:
+        # 万が一エラーが出た場合は標準のレイアウトを適用
+        pass
+
     buf = io.BytesIO()
     fig.savefig(buf, format="png")
     buf.seek(0)
@@ -72,7 +76,6 @@ st.set_page_config(page_title=f"CartGrapher Studio v{VERSION}", layout="wide")
 st.title(f"🚀 CartGrapher Studio ver {VERSION}")
 
 st.sidebar.header("解析設定")
-# 質量mのLatex表記と単位[kg]
 mass_input = st.sidebar.number_input(r"台車の質量 $m$ [kg]", value=0.100, min_value=0.001, format="%.3f", step=0.001)
 mask_size = st.sidebar.slider("解析エリア半径 (px)", 50, 400, 200, 10)
 
@@ -84,7 +87,7 @@ if uploaded_file:
     tfile_temp.close()
 
     if "df" not in st.session_state or st.session_state.get("file_id") != uploaded_file.name:
-        with st.spinner("最高精度エンジンで解析中..."):
+        with st.spinner("解析中..."):
             cap = cv2.VideoCapture(tfile_temp.name)
             fps = cap.get(cv2.CAP_PROP_FPS) or 30
             w, h = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
@@ -150,7 +153,6 @@ if uploaded_file:
     a_mi, a_ma = float(df["a"].min()), float(df["a"].max())
     f_mi, f_ma = float(df["F"].min()), float(df["F"].max())
 
-    # グラフ表示（t1, t2のマーカー付き）
     marker_list = [t1, t2]
     r1c1, r1c2 = st.columns(2)
     with r1c1:
@@ -175,6 +177,7 @@ if uploaded_file:
         st.latex(rf"W = {format_sci_latex(w_val)} \,\, \mathrm{{J}}")
 
     if st.button(f"🎥 解析動画を生成して保存"):
+        # 動画生成ロジック
         meta = st.session_state.video_meta
         final_path = tempfile.NamedTemporaryFile(suffix='.mp4', delete=False).name
         v_size = meta["w"] // 4
@@ -202,12 +205,11 @@ if uploaded_file:
             df_s = df.iloc[:i+1]
             
             for idx, g in enumerate(graph_configs):
-                # 動画内グラフにもマーカーを反映
                 g_img = create_graph_image(df_s, g["xc"], g["yc"], g["xl"], g["yl"], g["xu"], g["yu"], g["col"], v_size, g["xm"], g["ymn"], g["ymx"], shade_range=(t1,t2) if g["yc"]=='F' else None, markers=[t1, t2])
                 canvas[0:v_size, idx*v_size:(idx+1)*v_size] = g_img
-                # 単位表記を動画内テキストでも綺麗にする
-                yu_display = g['yu'].replace("^2", "2") # 簡易表記
-                val_text = f"{g['yl']} = {curr[g['yc']]:>+7.3f} {yu_display}"
+                # 動画内のテキスト（^2は上付きにできないため通常の2として表示）
+                yu_disp = g['yu'].replace("^2", "2")
+                val_text = f"{g['yl']} = {curr[g['yc']]:>+7.3f} {yu_disp}"
                 (tw, th), _ = cv2.getTextSize(val_text, font, 0.45, 1)
                 cv2.putText(canvas, val_text, (idx*v_size + (v_size-tw)//2, v_size + 50), font, 0.45, (255,255,255), 1, cv2.LINE_AA)
             
