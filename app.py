@@ -193,4 +193,61 @@ if uploaded_file:
         
         graph_configs = [
             {"xc": "t", "yc": "x", "xl": "t", "yl": "x", "xu": "s", "yu": "m", "col": "blue", "ymn": 0.0, "ymx": x_m, "xm": t_m},
-            {"xc": "t", "yc": "v", "xl": "t", "yl": "v", "xu": "s", "yu": "m/s", "col": "red", "ymn": v_mi, "ym
+            {"xc": "t", "yc": "v", "xl": "t", "yl": "v", "xu": "s", "yu": "m/s", "col": "red", "ymn": v_mi, "ymx": v_ma, "xm": t_m},
+            # --- 【修正】OpenCVの文字化け回避のため m/s^2 に変更 ---
+            {"xc": "t", "yc": "a", "xl": "t", "yl": "a", "xu": "s", "yu": "m/s^2", "col": "green", "ymn": a_mi, "ymx": a_ma, "xm": t_m},
+            # --------------------------------------------------
+            {"xc": "x", "yc": "F", "xl": "x", "yl": "F", "xu": "m", "yu": "N", "col": "purple", "ymn": f_mi, "ymx": f_ma, "xm": x_m}
+        ]
+
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        out = cv2.VideoWriter(final_path, fourcc, meta["fps"], (meta["w"], meta["h"] + header_h))
+        
+        cap = cv2.VideoCapture(meta["path"])
+        p_bar = st.progress(0.0)
+        status_text = st.empty()
+        
+        scale = meta.get("scale", 1.0)
+
+        for i in range(len(df)):
+            ret, frame_raw = cap.read()
+            if not ret: break
+            
+            if scale < 1.0:
+                frame = cv2.resize(frame_raw, (meta["w"], meta["h"]))
+            else:
+                frame = frame_raw
+            
+            canvas = np.zeros((meta["h"] + header_h, meta["w"], 3), dtype=np.uint8)
+            curr = df.iloc[i]
+            df_s = df.iloc[:i+1]
+            
+            for idx, g in enumerate(graph_configs):
+                g_img = create_graph_image(df_s, g["xc"], g["yc"], g["xl"], g["yl"], g["xu"], g["yu"], g["col"], v_size, g["xm"], g["ymn"], g["ymx"], shade_range=None, markers=None)
+                canvas[0:v_size, idx*v_size:(idx+1)*v_size] = g_img
+                val_text = f"{g['yl']} = {curr[g['yc']]:>+7.3f} {g['yu']}"
+                (tw, th), _ = cv2.getTextSize(val_text, font, 0.5, 1)
+                cv2.putText(canvas, val_text, (idx*v_size + (v_size-tw)//2, v_size + 50), font, 0.5, (255,255,255), 1, cv2.LINE_AA)
+            
+            t_text = f"t = {curr['t']:.2f} s"
+            cv2.putText(frame, t_text, (20, 40), font, 1.0, (255,255,255), 2, cv2.LINE_AA)
+            
+            if not np.isnan(curr['gx']):
+                cv2.circle(frame, (int(curr['gx']), int(curr['gy'])), mask_size, (255,255,0), 2)
+                cv2.circle(frame, (int(curr['gx']), int(curr['gy'])), 5, (0,255,0), -1)
+                if not np.isnan(curr['bx']):
+                    cv2.circle(frame, (int(curr['bx']), int(curr['by'])), 5, (255,0,255), -1)
+            
+            canvas[header_h:, :] = frame
+            out.write(canvas)
+            if i % 10 == 0:
+                p_bar.progress(i / len(df))
+                status_text.text(f"生成中: {i}/{len(df)} フレーム")
+
+        cap.release()
+        out.release()
+        p_bar.empty()
+        status_text.success("✅ 動画生成が完了しました！")
+        
+        with open(final_path, "rb") as f:
+            st.download_button("💾 完成した動画をダウンロード", f, file_name=f"analysis_v{VERSION}.mp4")
