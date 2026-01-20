@@ -12,7 +12,7 @@ import os
 plt.switch_backend('Agg')
 plt.rcParams['mathtext.fontset'] = 'cm'
 RADIUS_M = 0.016
-VERSION = "2.6.9_fixed" # 修正版
+VERSION = "2.6.9_fixed_120fps" # 修正版
 MAX_DURATION = 10.0
 MAX_ANALYSIS_WIDTH = 1280
 
@@ -44,7 +44,6 @@ def create_graph_image(df_sub, x_col, y_col, x_label, y_label, x_unit, y_unit, c
                 mask = (df_sub['t'] >= t_s) & (df_sub['t'] <= t_e)
                 ax.fill_between(df_sub[x_col], df_sub[y_col], where=mask, color=color, alpha=0.3)
         
-        # 軸ラベル: 渡された y_unit (m/s²など) をそのまま使用
         ax.set_title(f"${y_label}$ - ${x_label}$", fontsize=14, fontweight='bold')
         ax.set_xlabel(f"${x_label}$ [{x_unit}]", fontsize=11)
         ax.set_ylabel(f"${y_label}$ [{y_unit}]", fontsize=11)
@@ -78,7 +77,12 @@ if uploaded_file:
     if "df" not in st.session_state or st.session_state.get("file_id") != uploaded_file.name:
         with st.spinner("最高精度エンジンで解析中..."):
             cap = cv2.VideoCapture(tfile_temp.name)
-            fps = cap.get(cv2.CAP_PROP_FPS) or 30
+            
+            # --- 修正箇所：120fps(4倍スロー)対応 ---
+            raw_fps = cap.get(cv2.CAP_PROP_FPS) or 30
+            # 読み込まれたFPSを4倍に設定して実時間に戻す
+            fps = raw_fps * 4 
+            # ------------------------------------
             
             raw_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
             raw_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
@@ -127,16 +131,19 @@ if uploaded_file:
                         elif diff < -np.pi: diff += 2*np.pi
                         total_angle += diff
                     prev_angle = curr_a
+                
+                # tの計算に補正後のfpsを使用
                 data_log.append({"t": f_idx/fps, "x": total_angle*RADIUS_M, "gx": gx, "gy": gy, "bx": bx, "by": by})
                 f_idx += 1
             cap.release()
             df = pd.DataFrame(data_log).interpolate().ffill().bfill()
             if len(df) > 31:
+                # 微分計算(fpsを掛ける部分)も自動的に補正後の値で行われる
                 df["x"] = savgol_filter(df["x"], 15, 2); df["v"] = savgol_filter(df["x"].diff().fillna(0)*fps, 31, 2)
                 df["a"] = savgol_filter(df["v"].diff().fillna(0)*fps, 31, 2); df["F"] = mass_input * df["a"]
             
             st.session_state.df = df; 
-            st.session_state.video_meta = {"fps": fps, "w": w, "h": h, "path": tfile_temp.name, "scale": scale_factor}
+            st.session_state.video_meta = {"fps": fps, "raw_fps": raw_fps, "w": w, "h": h, "path": tfile_temp.name, "scale": scale_factor}
             st.session_state.file_id = uploaded_file.name
 
     df = st.session_state.df
@@ -192,22 +199,16 @@ if uploaded_file:
         header_h = v_size + 100
         font = cv2.FONT_HERSHEY_SIMPLEX
         
-        # --- 修正箇所 ---
         graph_configs = [
             {"xc": "t", "yc": "x", "xl": "t", "yl": "x", "xu": "s", "yu": "m", "col": "blue", "ymn": 0.0, "ymx": x_m, "xm": t_m},
             {"xc": "t", "yc": "v", "xl": "t", "yl": "v", "xu": "s", "yu": "m/s", "col": "red", "ymn": v_mi, "ymx": v_ma, "xm": t_m},
-            
-            # 【重要】
-            # yu: "m/s²" (元のまま。グラフ軸ラベル用。Matplotlibはこれで描画)
-            # yu_cv: "m/s^2" (新規追加。動画上の数値表示用。OpenCVの文字化け回避のためASCII文字を使用)
             {"xc": "t", "yc": "a", "xl": "t", "yl": "a", "xu": "s", "yu": "m/s²", "yu_cv": "m/s^2", "col": "green", "ymn": a_mi, "ymx": a_ma, "xm": t_m},
-            
             {"xc": "x", "yc": "F", "xl": "x", "yl": "F", "xu": "m", "yu": "N", "col": "purple", "ymn": f_mi, "ymx": f_ma, "xm": x_m}
         ]
-        # ----------------
 
         fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-        out = cv2.VideoWriter(final_path, fourcc, meta["fps"], (meta["w"], meta["h"] + header_h))
+        # 出力動画のFPSは、スロー映像としての再生速度(raw_fps)に合わせて保存
+        out = cv2.VideoWriter(final_path, fourcc, meta["raw_fps"], (meta["w"], meta["h"] + header_h))
         
         cap = cv2.VideoCapture(meta["path"])
         p_bar = st.progress(0.0)
@@ -229,14 +230,11 @@ if uploaded_file:
             df_s = df.iloc[:i+1]
             
             for idx, g in enumerate(graph_configs):
-                # グラフ描画: yu (m/s²) を使用 -> Matplotlibの軸ラベルは元のまま
                 g_img = create_graph_image(df_s, g["xc"], g["yc"], g["xl"], g["yl"], g["xu"], g["yu"], g["col"], v_size, g["xm"], g["ymn"], g["ymx"], shade_range=None, markers=None)
                 canvas[0:v_size, idx*v_size:(idx+1)*v_size] = g_img
                 
-                # --- 動画内のテキスト表示: yu_cv ("m/s^2") があれば優先使用 ---
                 disp_unit = g.get("yu_cv", g["yu"]) 
                 val_text = f"{g['yl']} = {curr[g['yc']]:>+7.3f} {disp_unit}"
-                # --------------------------------------------------------
                 
                 (tw, th), _ = cv2.getTextSize(val_text, font, 0.5, 1)
                 cv2.putText(canvas, val_text, (idx*v_size + (v_size-tw)//2, v_size + 50), font, 0.5, (255,255,255), 1, cv2.LINE_AA)
