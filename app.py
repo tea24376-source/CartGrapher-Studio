@@ -91,7 +91,7 @@ if uploaded_file:
             h = int(raw_h * scale_factor)
 
             data_log = []; total_angle, prev_angle = 0.0, None; last_valid_gx, last_valid_gy = np.nan, np.nan
-            L_G, L_P = (np.array([35,50,50]), np.array([85,255,255])), (np.array([140,40,40]), np.array([180,255,255]))
+            L_G, L_P = (np.array([35,50,50]), np.array([85,255,255])), (np.array([130,20,40]), np.array([180,255,255]))
             f_idx = 0
             while True:
                 ret, frame_raw = cap.read()
