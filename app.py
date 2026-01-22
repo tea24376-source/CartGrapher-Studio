@@ -189,7 +189,10 @@ if uploaded_file:
     st.divider()
     df_w = df[(df["t"] >= t1) & (df["t"] <= t2)]
     if len(df_w) > 1:
-        w_val = np.trapezoid(df_w["F"], df_w["x"])
+        if hasattr(np, 'trapezoid'):
+    w_val = np.trapezoid(df_w["F"], df_w["x"])
+else:
+    w_val = np.trapz(df_w["F"], df_w["x"])
         st.latex(rf"W = {format_sci_latex(w_val)} \,\, \mathrm{{J}}")
 
     if st.button(f"🎥 解析動画を生成して保存"):
