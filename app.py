@@ -77,12 +77,8 @@ if uploaded_file:
     if "df" not in st.session_state or st.session_state.get("file_id") != uploaded_file.name:
         with st.spinner("最高精度エンジンで解析中..."):
             cap = cv2.VideoCapture(tfile_temp.name)
-            
-            # --- 修正箇所：120fps(4倍スロー)対応 ---
             raw_fps = cap.get(cv2.CAP_PROP_FPS) or 30
-            # 読み込まれたFPSを4倍に設定して実時間に戻す
             fps = raw_fps * 4 
-            # ------------------------------------
             
             raw_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
             raw_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
@@ -132,13 +128,11 @@ if uploaded_file:
                         total_angle += diff
                     prev_angle = curr_a
                 
-                # tの計算に補正後のfpsを使用
                 data_log.append({"t": f_idx/fps, "x": total_angle*RADIUS_M, "gx": gx, "gy": gy, "bx": bx, "by": by})
                 f_idx += 1
             cap.release()
             df = pd.DataFrame(data_log).interpolate().ffill().bfill()
             if len(df) > 31:
-                # 微分計算(fpsを掛ける部分)も自動的に補正後の値で行われる
                 df["x"] = savgol_filter(df["x"], 15, 2); df["v"] = savgol_filter(df["x"].diff().fillna(0)*fps, 31, 2)
                 df["a"] = savgol_filter(df["v"].diff().fillna(0)*fps, 31, 2); df["F"] = mass_input * df["a"]
             
@@ -189,10 +183,11 @@ if uploaded_file:
     st.divider()
     df_w = df[(df["t"] >= t1) & (df["t"] <= t2)]
     if len(df_w) > 1:
+        # インデントと関数名の修正
         if hasattr(np, 'trapezoid'):
-    w_val = np.trapezoid(df_w["F"], df_w["x"])
-else:
-    w_val = np.trapz(df_w["F"], df_w["x"])
+            w_val = np.trapezoid(df_w["F"], df_w["x"])
+        else:
+            w_val = np.trapz(df_w["F"], df_w["x"])
         st.latex(rf"W = {format_sci_latex(w_val)} \,\, \mathrm{{J}}")
 
     if st.button(f"🎥 解析動画を生成して保存"):
@@ -210,7 +205,6 @@ else:
         ]
 
         fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-        # 出力動画のFPSは、スロー映像としての再生速度(raw_fps)に合わせて保存
         out = cv2.VideoWriter(final_path, fourcc, meta["raw_fps"], (meta["w"], meta["h"] + header_h))
         
         cap = cv2.VideoCapture(meta["path"])
