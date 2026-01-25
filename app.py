@@ -12,7 +12,7 @@ import os
 plt.switch_backend('Agg') 
 plt.rcParams['mathtext.fontset'] = 'cm' 
 RADIUS_M = 0.016 
-VERSION = "2.9.3_Steady_Response" 
+VERSION = "2.9.4_Final_Stable" 
 MAX_DURATION = 10.0 
 MAX_ANALYSIS_WIDTH = 1280 
 
@@ -75,13 +75,14 @@ if uploaded_file:
     tfile_temp.close() 
 
     if "df" not in st.session_state or st.session_state.get("file_id") != uploaded_file.name: 
-        with st.spinner("バランス重視トラッキング中..."): 
+        with st.spinner("エラー修正版・最適化トラッキング実行中..."): 
             cap = cv2.VideoCapture(tfile_temp.name) 
             raw_fps = cap.get(cv2.CAP_PROP_FPS) or 30 
             fps = raw_fps * 4  
              
-            raw_w = int(cap.get(cv2.CAP_PROP_WIDTH)) 
-            raw_h = int(cap.get(cv2.CAP_PROP_HEIGHT)) 
+            # --- ここを修正: FRAME_WIDTH / FRAME_HEIGHT ---
+            raw_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) 
+            raw_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) 
              
             scale_factor = 1.0 
             if raw_w > MAX_ANALYSIS_WIDTH: 
@@ -93,9 +94,9 @@ if uploaded_file:
             data_log = []; total_angle, prev_angle = 0.0, None 
             last_valid_gx, last_valid_gy = np.nan, np.nan 
             
-            # --- EMAパラメータ ---
+            # --- パラメータ ---
             ema_bx, ema_by = np.nan, np.nan
-            ALPHA = 0.75 # ラグとチラつきのベストバランス
+            # ALPHA = 0.7 # 基本のスムージング強度
 
             L_G = (np.array([40, 50, 50]), np.array([90, 255, 255]))
             L_P_loose = (np.array([140, 25, 60]), np.array([180, 255, 255]))
@@ -107,11 +108,9 @@ if uploaded_file:
                 if not ret: break 
                  
                 frame = cv2.resize(frame_raw, (w, h)) if scale_factor < 1.0 else frame_raw 
-                # 軽いぼかしでピクセル単位のノイズを丸める
                 blurred = cv2.GaussianBlur(frame, (5, 5), 0)
                 hsv = cv2.cvtColor(blurred, cv2.COLOR_BGR2HSV) 
 
-                # 1. 緑（中心）
                 mask_g = cv2.inRange(hsv, L_G[0], L_G[1])
                 con_g, _ = cv2.findContours(mask_g, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE) 
                 gx, gy = np.nan, np.nan 
@@ -126,7 +125,6 @@ if uploaded_file:
                         gx, gy = last_valid_gx, last_valid_gy 
                 if not np.isnan(gx): last_valid_gx, last_valid_gy = gx, gy
 
-                # 2. ピンク（回転点）
                 bx, by = np.nan, np.nan 
                 if not np.isnan(gx): 
                     roi_mask = np.zeros((h, w), dtype=np.uint8)
@@ -134,7 +132,6 @@ if uploaded_file:
                     
                     mask_p = cv2.inRange(hsv, L_P_loose[0], L_P_loose[1])
                     mask_p_roi = cv2.bitwise_and(mask_p, roi_mask)
-                    # 膨張・収縮で形状を安定させる
                     mask_p_roi = cv2.morphologyEx(mask_p_roi, cv2.MORPH_OPEN, kernel)
                     mask_p_roi = cv2.morphologyEx(mask_p_roi, cv2.MORPH_CLOSE, kernel)
                     
@@ -149,14 +146,15 @@ if uploaded_file:
                             if np.isnan(ema_bx):
                                 ema_bx, ema_by = raw_bx, raw_by
                             else:
-                                # EMAフィルタ
-                                ema_bx = ALPHA * raw_bx + (1 - ALPHA) * ema_bx
-                                ema_by = ALPHA * raw_by + (1 - ALPHA) * ema_by
+                                # A. 変化量（速度）に応じてALPHAを可変にする
+                                dist = np.sqrt((raw_bx - ema_bx)**2 + (raw_by - ema_by)**2)
+                                # 動きが速いときは 0.9 (ラグ小), 遅いときは 0.5 (チラつき抑止) に可変
+                                adaptive_alpha = 0.5 + min(0.4, dist / 10.0) 
+                                
+                                ema_bx = adaptive_alpha * raw_bx + (1 - adaptive_alpha) * ema_bx
+                                ema_by = adaptive_alpha * raw_by + (1 - adaptive_alpha) * ema_by
                             
                             bx, by = ema_bx, ema_by
-                        else:
-                            # 完全に消えた場合のみリセット。チラつき程度なら前回の値を維持。
-                            pass 
 
                 if not np.isnan(gx) and not np.isnan(bx): 
                     curr_a = np.arctan2(by - gy, bx - gx) 
@@ -182,7 +180,7 @@ if uploaded_file:
             st.session_state.video_meta = {"fps": fps, "raw_fps": raw_fps, "w": w, "h": h, "path": tfile_temp.name, "scale": scale_factor} 
             st.session_state.file_id = uploaded_file.name 
 
-    # --- 以下、UIと動画生成（変更なし） ---
+    # --- UI &表示 (前回同様) ---
     df = st.session_state.df 
     st.sidebar.markdown("---") 
     t_max_limit = float(df["t"].max()) 
@@ -205,30 +203,21 @@ if uploaded_file:
     a_mi, a_ma = float(df["a"].min()), float(df["a"].max()) 
     f_mi, f_ma = float(df["F"].min()), float(df["F"].max()) 
 
-    marker_times = [t1, t2] 
-
     r1c1, r1c2 = st.columns(2) 
     with r1c1: 
-        st.image(create_graph_image(df.iloc[:time_idx+1], "t", "x", "t", "x", "s", "m", 'blue', 450, t_m, 0.0, x_m, markers=marker_times), channels="BGR") 
+        st.image(create_graph_image(df.iloc[:time_idx+1], "t", "x", "t", "x", "s", "m", 'blue', 450, t_m, 0.0, x_m, markers=[t1, t2]), channels="BGR") 
         st.latex(rf"x = {curr_row['x']:.3f} \,\, \mathrm{{m}}") 
     with r1c2: 
-        st.image(create_graph_image(df.iloc[:time_idx+1], "t", "v", "t", "v", "s", "m/s", 'red', 450, t_m, v_mi, v_ma, markers=marker_times), channels="BGR") 
+        st.image(create_graph_image(df.iloc[:time_idx+1], "t", "v", "t", "v", "s", "m/s", 'red', 450, t_m, v_mi, v_ma, markers=[t1, t2]), channels="BGR") 
         st.latex(rf"v = {curr_row['v']:.3f} \,\, \mathrm{{m/s}}") 
 
     r2c1, r2c2 = st.columns(2) 
     with r2c1: 
-        st.image(create_graph_image(df.iloc[:time_idx+1], "t", "a", "t", "a", "s", "m/s²", 'green', 450, t_m, a_mi, a_ma, markers=marker_times), channels="BGR") 
+        st.image(create_graph_image(df.iloc[:time_idx+1], "t", "a", "t", "a", "s", "m/s²", 'green', 450, t_m, a_mi, a_ma, markers=[t1, t2]), channels="BGR") 
         st.latex(rf"a = {curr_row['a']:.3f} \,\, \mathrm{{m/s^2}}") 
     with r2c2: 
-        st.image(create_graph_image(df.iloc[:time_idx+1], "x", "F", "x", "F", "m", "N", 'purple', 450, x_m, f_mi, f_ma, shade_range=(t1, t2), markers=marker_times), channels="BGR") 
+        st.image(create_graph_image(df.iloc[:time_idx+1], "x", "F", "x", "F", "m", "N", 'purple', 450, x_m, f_mi, f_ma, shade_range=(t1, t2), markers=[t1, t2]), channels="BGR") 
         st.latex(rf"F = {curr_row['F']:.3f} \,\, \mathrm{{N}}") 
-
-    st.divider() 
-    df_w = df[(df["t"] >= t1) & (df["t"] <= t2)] 
-    if len(df_w) > 1: 
-        if hasattr(np, 'trapezoid'): w_val = np.trapezoid(df_w["F"], df_w["x"]) 
-        else: w_val = np.trapz(df_w["F"], df_w["x"]) 
-        st.latex(rf"W = {format_sci_latex(w_val)} \,\, \mathrm{{J}}") 
 
     if st.button(f"🎥 解析動画を生成して保存"): 
         meta = st.session_state.video_meta 
