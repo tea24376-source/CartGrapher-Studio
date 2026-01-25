@@ -12,7 +12,7 @@ import os
 plt.switch_backend('Agg') 
 plt.rcParams['mathtext.fontset'] = 'cm' 
 RADIUS_M = 0.016 
-VERSION = "2.9.2_Fast_Response" 
+VERSION = "2.9.3_Steady_Response" 
 MAX_DURATION = 10.0 
 MAX_ANALYSIS_WIDTH = 1280 
 
@@ -75,13 +75,13 @@ if uploaded_file:
     tfile_temp.close() 
 
     if "df" not in st.session_state or st.session_state.get("file_id") != uploaded_file.name: 
-        with st.spinner("高速・高感度トラッキング中..."): 
+        with st.spinner("バランス重視トラッキング中..."): 
             cap = cv2.VideoCapture(tfile_temp.name) 
             raw_fps = cap.get(cv2.CAP_PROP_FPS) or 30 
             fps = raw_fps * 4  
              
-            raw_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) 
-            raw_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) 
+            raw_w = int(cap.get(cv2.CAP_PROP_WIDTH)) 
+            raw_h = int(cap.get(cv2.CAP_PROP_HEIGHT)) 
              
             scale_factor = 1.0 
             if raw_w > MAX_ANALYSIS_WIDTH: 
@@ -93,9 +93,9 @@ if uploaded_file:
             data_log = []; total_angle, prev_angle = 0.0, None 
             last_valid_gx, last_valid_gy = np.nan, np.nan 
             
-            # --- パラメータ調整 ---
+            # --- EMAパラメータ ---
             ema_bx, ema_by = np.nan, np.nan
-            ALPHA = 0.9 # レスポンスを上げるために0.9に変更（ほぼ生データに近いがチラつきだけ消す）
+            ALPHA = 0.75 # ラグとチラつきのベストバランス
 
             L_G = (np.array([40, 50, 50]), np.array([90, 255, 255]))
             L_P_loose = (np.array([140, 25, 60]), np.array([180, 255, 255]))
@@ -107,10 +107,11 @@ if uploaded_file:
                 if not ret: break 
                  
                 frame = cv2.resize(frame_raw, (w, h)) if scale_factor < 1.0 else frame_raw 
-                # ガウスぼかしを (3,3) に縮小してエッジのキレを維持
-                blurred = cv2.GaussianBlur(frame, (3, 3), 0)
+                # 軽いぼかしでピクセル単位のノイズを丸める
+                blurred = cv2.GaussianBlur(frame, (5, 5), 0)
                 hsv = cv2.cvtColor(blurred, cv2.COLOR_BGR2HSV) 
 
+                # 1. 緑（中心）
                 mask_g = cv2.inRange(hsv, L_G[0], L_G[1])
                 con_g, _ = cv2.findContours(mask_g, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE) 
                 gx, gy = np.nan, np.nan 
@@ -125,6 +126,7 @@ if uploaded_file:
                         gx, gy = last_valid_gx, last_valid_gy 
                 if not np.isnan(gx): last_valid_gx, last_valid_gy = gx, gy
 
+                # 2. ピンク（回転点）
                 bx, by = np.nan, np.nan 
                 if not np.isnan(gx): 
                     roi_mask = np.zeros((h, w), dtype=np.uint8)
@@ -132,29 +134,29 @@ if uploaded_file:
                     
                     mask_p = cv2.inRange(hsv, L_P_loose[0], L_P_loose[1])
                     mask_p_roi = cv2.bitwise_and(mask_p, roi_mask)
+                    # 膨張・収縮で形状を安定させる
+                    mask_p_roi = cv2.morphologyEx(mask_p_roi, cv2.MORPH_OPEN, kernel)
                     mask_p_roi = cv2.morphologyEx(mask_p_roi, cv2.MORPH_CLOSE, kernel)
                     
                     con_p, _ = cv2.findContours(mask_p_roi, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE) 
                     if con_p: 
                         cp = max(con_p, key=cv2.contourArea)
                         Mp = cv2.moments(cp) 
-                        if Mp["m00"] > 25: # 感度を上げるために閾値を下げる
+                        if Mp["m00"] > 25: 
                             raw_bx = Mp["m10"]/Mp["m00"]
                             raw_by = Mp["m01"]/Mp["m00"]
                             
                             if np.isnan(ema_bx):
                                 ema_bx, ema_by = raw_bx, raw_by
                             else:
-                                # ジャンプ制限を撤廃し、ALPHAで追従させる
+                                # EMAフィルタ
                                 ema_bx = ALPHA * raw_bx + (1 - ALPHA) * ema_bx
                                 ema_by = ALPHA * raw_by + (1 - ALPHA) * ema_by
                             
                             bx, by = ema_bx, ema_by
                         else:
-                            # 見失った場合はEMAをリセット（取り残し防止）
-                            ema_bx, ema_by = np.nan, np.nan
-                    else:
-                        ema_bx, ema_by = np.nan, np.nan
+                            # 完全に消えた場合のみリセット。チラつき程度なら前回の値を維持。
+                            pass 
 
                 if not np.isnan(gx) and not np.isnan(bx): 
                     curr_a = np.arctan2(by - gy, bx - gx) 
@@ -180,7 +182,7 @@ if uploaded_file:
             st.session_state.video_meta = {"fps": fps, "raw_fps": raw_fps, "w": w, "h": h, "path": tfile_temp.name, "scale": scale_factor} 
             st.session_state.file_id = uploaded_file.name 
 
-    # --- UI & 表示ロジック ---
+    # --- 以下、UIと動画生成（変更なし） ---
     df = st.session_state.df 
     st.sidebar.markdown("---") 
     t_max_limit = float(df["t"].max()) 
@@ -247,7 +249,6 @@ if uploaded_file:
             canvas = np.zeros((meta["h"] + header_h, meta["w"], 3), dtype=np.uint8) 
             curr = df.iloc[i] 
             
-            # 動画内描画
             if not np.isnan(curr['gx']): 
                 cv2.circle(frame, (int(curr['gx']), int(curr['gy'])), search_range, (255,255,0), 1)
                 cv2.circle(frame, (int(curr['gx']), int(curr['gy'])), 5, (0,255,0), -1) 
