@@ -12,7 +12,7 @@ import os
 plt.switch_backend('Agg') 
 plt.rcParams['mathtext.fontset'] = 'cm' 
 RADIUS_M = 0.016 
-VERSION = "2.9.5_Jump_Filtered" 
+VERSION = "3.0.0_Vector_Method" 
 MAX_DURATION = 10.0 
 MAX_ANALYSIS_WIDTH = 1280 
 
@@ -37,7 +37,7 @@ def create_graph_image(df_sub, x_col, y_col, x_label, y_label, x_unit, y_unit, c
                 for t_val in markers: 
                     m_row = df_sub.iloc[(df_sub['t']-t_val).abs().argsort()[:1]] 
                     if not m_row.empty: 
-                        ax.scatter(m_row[x_col], m_row[y_col], color='orange', s=50, marker='o', edgecolors='black', zorder=10) 
+                        ax.scatter(m_row[x_col], m_row[y_row if 'y_row' in locals() else y_col], color='orange', s=50, marker='o', edgecolors='black', zorder=10) 
 
             if shade_range is not None and y_col == 'F': 
                 t_s, t_e = shade_range 
@@ -75,7 +75,7 @@ if uploaded_file:
     tfile_temp.close() 
 
     if "df" not in st.session_state or st.session_state.get("file_id") != uploaded_file.name: 
-        with st.spinner("ジャンプ抑制フィルタを適用して解析中..."): 
+        with st.spinner("平均角度ベクトル解析を実行中..."): 
             cap = cv2.VideoCapture(tfile_temp.name) 
             raw_fps = cap.get(cv2.CAP_PROP_FPS) or 30 
             fps = raw_fps * 4  
@@ -92,7 +92,6 @@ if uploaded_file:
 
             data_log = []; total_angle, prev_angle = 0.0, None 
             last_valid_gx, last_valid_gy = np.nan, np.nan 
-            last_valid_bx, last_valid_by = np.nan, np.nan # ピンクの過去位置保存用
 
             L_G = (np.array([40, 50, 50]), np.array([90, 255, 255]))
             L_P_loose = (np.array([140, 25, 60]), np.array([180, 255, 255]))
@@ -106,7 +105,7 @@ if uploaded_file:
                 frame = cv2.resize(frame_raw, (w, h)) if scale_factor < 1.0 else frame_raw 
                 hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV) 
 
-                # 1. 緑（中心点）の検出とジャンプ抑制
+                # 緑（中心）の検出
                 mask_g = cv2.inRange(hsv, L_G[0], L_G[1])
                 con_g, _ = cv2.findContours(mask_g, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE) 
                 gx, gy = np.nan, np.nan 
@@ -121,39 +120,36 @@ if uploaded_file:
                         gx, gy = last_valid_gx, last_valid_gy 
                 if not np.isnan(gx): last_valid_gx, last_valid_gy = gx, gy
 
-                # 2. ピンク（回転点）の検出とジャンプ抑制
                 bx, by = np.nan, np.nan 
+                curr_a = np.nan
                 if not np.isnan(gx): 
+                    # 探索用マスク作成
                     roi_mask = np.zeros((h, w), dtype=np.uint8)
                     cv2.circle(roi_mask, (int(gx), int(gy)), search_range, 255, -1)
                     
+                    # ピンク色ピクセルの抽出
                     mask_p = cv2.inRange(hsv, L_P_loose[0], L_P_loose[1])
                     mask_p_roi = cv2.bitwise_and(mask_p, roi_mask)
                     mask_p_roi = cv2.morphologyEx(mask_p_roi, cv2.MORPH_CLOSE, kernel)
                     
-                    con_p, _ = cv2.findContours(mask_p_roi, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE) 
-                    if con_p: 
-                        cp = max(con_p, key=cv2.contourArea)
-                        Mp = cv2.moments(cp) 
-                        if Mp["m00"] > 20: 
-                            raw_bx, raw_by = Mp["m10"]/Mp["m00"], Mp["m01"]/Mp["m00"] 
-                            
-                            # --- ジャンプ対策の追加 ---
-                            if not np.isnan(last_valid_bx):
-                                dist = np.sqrt((raw_bx - last_valid_bx)**2 + (raw_by - last_valid_by)**2)
-                                if dist > 60: # 60px以上の急激なジャンプは無視（NaNにして補間に任せる）
-                                    bx, by = np.nan, np.nan
-                                else:
-                                    bx, by = raw_bx, raw_by
-                            else:
-                                bx, by = raw_bx, raw_by
-                                
-                            if not np.isnan(bx):
-                                last_valid_bx, last_valid_by = bx, by
+                    # ピクセル座標のリストを取得
+                    p_coords = np.column_stack(np.where(mask_p_roi > 0)) # [[y, x], ...]
+                    
+                    if len(p_coords) > 5: # 一定数以上のピクセルがあれば平均角度を計算
+                        # 各ピクセルと緑中心との相対座標(dx, dy)
+                        dys = p_coords[:, 0] - gy
+                        dxs = p_coords[:, 1] - gx
+                        
+                        # ベクトル合成（平均角度の算出）
+                        # 角度を直接平均せず、sin/cos成分を合計してarctan2で戻すことで、不連続点（180/-180度）を回避
+                        avg_cos = np.mean(dxs / np.sqrt(dxs**2 + dys**2))
+                        avg_sin = np.mean(dys / np.sqrt(dxs**2 + dys**2))
+                        curr_a = np.arctan2(avg_sin, avg_cos)
+                        
+                        # 表示用ダミー座標（半径50の円周上に描画）
+                        bx, by = gx + 50 * np.cos(curr_a), gy + 50 * np.sin(curr_a)
 
-                # 角度と累積回転の計算
-                if not np.isnan(gx) and not np.isnan(bx): 
-                    curr_a = np.arctan2(by - gy, bx - gx) 
+                if not np.isnan(curr_a): 
                     if prev_angle is not None: 
                         diff = curr_a - prev_angle 
                         if diff > np.pi: diff -= 2*np.pi 
@@ -165,8 +161,7 @@ if uploaded_file:
                 f_idx += 1 
 
             cap.release() 
-            # 異常値（NaN）を前後の平均値（線形補間）で埋める
-            df = pd.DataFrame(data_log).interpolate(method='linear').ffill().bfill() 
+            df = pd.DataFrame(data_log).interpolate().ffill().bfill() 
             if len(df) > 31: 
                 df["x"] = savgol_filter(df["x"], 15, 2)
                 df["v"] = savgol_filter(df["x"].diff().fillna(0)*fps, 31, 2) 
@@ -177,12 +172,19 @@ if uploaded_file:
             st.session_state.video_meta = {"fps": fps, "raw_fps": raw_fps, "w": w, "h": h, "path": tfile_temp.name, "scale": scale_factor} 
             st.session_state.file_id = uploaded_file.name 
 
-    # --- UI/動画生成部分は v2.7.6 を維持 ---
+    # --- UI/表示ロジック (v2.7.6構成を維持) ---
     df = st.session_state.df 
     st.sidebar.markdown("---") 
     t_max_limit = float(df["t"].max()) 
     t1 = st.sidebar.number_input(r"開始時刻 $t_1$ [s]", 0.0, t_max_limit, 0.0, 0.01) 
+    row1 = df.iloc[(df['t']-t1).abs().argsort()[:1]] 
+    st.sidebar.markdown(rf"$x_1 = {row1['x'].values[0]:.3f} \,\, \mathrm{{m}}$") 
+    st.sidebar.markdown(rf"$v_1 = {row1['v'].values[0]:.3f} \,\, \mathrm{{m/s}}$") 
+    st.sidebar.markdown("---") 
     t2 = st.sidebar.number_input(r"終了時刻 $t_2$ [s]", 0.0, t_max_limit, t_max_limit, 0.01) 
+    row2 = df.iloc[(df['t']-t2).abs().argsort()[:1]] 
+    st.sidebar.markdown(rf"$x_2 = {row2['x'].values[0]:.3f} \,\, \mathrm{{m}}$") 
+    st.sidebar.markdown(rf"$v_2 = {row2['v'].values[0]:.3f} \,\, \mathrm{{m/s}}$") 
 
     time_list = [round(t, 4) for t in df["t"].tolist()] 
     selected_t = st.select_slider("時刻をスキャン [s]", options=time_list, value=time_list[0]) 
@@ -192,18 +194,29 @@ if uploaded_file:
     v_mi, v_ma = float(df["v"].min()), float(df["v"].max()) 
     a_mi, a_ma = float(df["a"].min()), float(df["a"].max()) 
     f_mi, f_ma = float(df["F"].min()), float(df["F"].max()) 
+    marker_times = [t1, t2]
 
     r1c1, r1c2 = st.columns(2) 
     with r1c1: 
-        st.image(create_graph_image(df.iloc[:time_idx+1], "t", "x", "t", "x", "s", "m", 'blue', 450, t_m, 0.0, x_m, markers=[t1, t2]), channels="BGR") 
+        st.image(create_graph_image(df.iloc[:time_idx+1], "t", "x", "t", "x", "s", "m", 'blue', 450, t_m, 0.0, x_m, markers=marker_times), channels="BGR") 
+        st.latex(rf"x = {curr_row['x']:.3f} \,\, \mathrm{{m}}") 
     with r1c2: 
-        st.image(create_graph_image(df.iloc[:time_idx+1], "t", "v", "t", "v", "s", "m/s", 'red', 450, t_m, v_mi, v_ma, markers=[t1, t2]), channels="BGR") 
+        st.image(create_graph_image(df.iloc[:time_idx+1], "t", "v", "t", "v", "s", "m/s", 'red', 450, t_m, v_mi, v_ma, markers=marker_times), channels="BGR") 
+        st.latex(rf"v = {curr_row['v']:.3f} \,\, \mathrm{{m/s}}") 
 
     r2c1, r2c2 = st.columns(2) 
     with r2c1: 
-        st.image(create_graph_image(df.iloc[:time_idx+1], "t", "a", "t", "a", "s", "m/s²", 'green', 450, t_m, a_mi, a_ma, markers=[t1, t2]), channels="BGR") 
+        st.image(create_graph_image(df.iloc[:time_idx+1], "t", "a", "t", "a", "s", "m/s²", 'green', 450, t_m, a_mi, a_ma, markers=marker_times), channels="BGR") 
+        st.latex(rf"a = {curr_row['a']:.3f} \,\, \mathrm{{m/s^2}}") 
     with r2c2: 
-        st.image(create_graph_image(df.iloc[:time_idx+1], "x", "F", "x", "F", "m", "N", 'purple', 450, x_m, f_mi, f_ma, shade_range=(t1, t2), markers=[t1, t2]), channels="BGR") 
+        st.image(create_graph_image(df.iloc[:time_idx+1], "x", "F", "x", "F", "m", "N", 'purple', 450, x_m, f_mi, f_ma, shade_range=(t1, t2), markers=marker_times), channels="BGR") 
+        st.latex(rf"F = {curr_row['F']:.3f} \,\, \mathrm{{N}}") 
+
+    st.divider() 
+    df_w = df[(df["t"] >= t1) & (df["t"] <= t2)] 
+    if len(df_w) > 1: 
+        w_val = np.trapz(df_w["F"], df_w["x"]) if not hasattr(np, 'trapezoid') else np.trapezoid(df_w["F"], df_w["x"])
+        st.latex(rf"W = {format_sci_latex(w_val)} \,\, \mathrm{{J}}") 
 
     if st.button(f"🎥 解析動画を生成して保存"): 
         meta = st.session_state.video_meta 
@@ -211,8 +224,18 @@ if uploaded_file:
         v_size = meta["w"] // 4 
         header_h = v_size + 100 
         font = cv2.FONT_HERSHEY_SIMPLEX 
-        out = cv2.VideoWriter(final_path, cv2.VideoWriter_fourcc(*'mp4v'), meta["raw_fps"], (meta["w"], meta["h"] + header_h)) 
+        
+        graph_configs = [ 
+            {"xc": "t", "yc": "x", "xl": "t", "yl": "x", "xu": "s", "yu": "m", "col": "blue", "ymn": 0.0, "ymx": x_m, "xm": t_m}, 
+            {"xc": "t", "yc": "v", "xl": "t", "yl": "v", "xu": "s", "yu": "m/s", "col": "red", "ymn": v_mi, "ymx": v_ma, "xm": t_m}, 
+            {"xc": "t", "yc": "a", "xl": "t", "yl": "a", "xu": "s", "yu": "m/s²", "yu_cv": "m/s^2", "col": "green", "ymn": a_mi, "ymx": a_ma, "xm": t_m}, 
+            {"xc": "x", "yc": "F", "xl": "x", "yl": "F", "xu": "m", "yu": "N", "col": "purple", "ymn": f_mi, "ymx": f_ma, "xm": x_m} 
+        ] 
+
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v') 
+        out = cv2.VideoWriter(final_path, fourcc, meta["raw_fps"], (meta["w"], meta["h"] + header_h)) 
         cap = cv2.VideoCapture(meta["path"]) 
+        p_bar = st.progress(0.0) 
         
         for i in range(len(df)): 
             ret, frame_raw = cap.read() 
@@ -220,16 +243,24 @@ if uploaded_file:
             frame = cv2.resize(frame_raw, (meta["w"], meta["h"])) if meta.get("scale", 1.0) < 1.0 else frame_raw 
             canvas = np.zeros((meta["h"] + header_h, meta["w"], 3), dtype=np.uint8) 
             curr = df.iloc[i] 
+            df_s = df.iloc[:i+1] 
             
-            # 動画内に緑とピンクの点を描画
+            for idx, g in enumerate(graph_configs): 
+                g_img = create_graph_image(df_s, g["xc"], g["yc"], g["xl"], g["yl"], g["xu"], g["yu"], g["col"], v_size, g["xm"], g["ymn"], g["ymx"]) 
+                canvas[0:v_size, idx*v_size:(idx+1)*v_size] = g_img 
+                val_text = f"{g['yl']} = {curr[g['yc']]:>+7.3f}" 
+                cv2.putText(canvas, val_text, (idx*v_size + 10, v_size + 50), font, 0.4, (255,255,255), 1) 
+
             if not np.isnan(curr['gx']): 
-                cv2.circle(frame, (int(curr['gx']), int(curr['gy'])), search_range, (255,255,0), 1)
                 cv2.circle(frame, (int(curr['gx']), int(curr['gy'])), 5, (0,255,0), -1) 
                 if not np.isnan(curr['bx']): 
+                    cv2.line(frame, (int(curr['gx']), int(curr['gy'])), (int(curr['bx']), int(curr['by'])), (255,0,255), 2)
                     cv2.circle(frame, (int(curr['bx']), int(curr['by'])), 5, (255,0,255), -1) 
              
             canvas[header_h:, :] = frame 
             out.write(canvas) 
+            if i % 10 == 0: p_bar.progress(i / len(df)) 
+
         cap.release(); out.release() 
         with open(final_path, "rb") as f: 
-            st.download_button("💾 動画をダウンロード", f, file_name=f"analysis_v{VERSION}.mp4")
+            st.download_button("💾 完成した動画をダウンロード", f, file_name=f"analysis_v{VERSION}.mp4")
