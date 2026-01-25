@@ -12,7 +12,7 @@ import os
 plt.switch_backend('Agg') 
 plt.rcParams['mathtext.fontset'] = 'cm' 
 RADIUS_M = 0.016 
-VERSION = "2.8.0_Smooth_Tracking" 
+VERSION = "2.9.0_EMA_Tracking" 
 MAX_DURATION = 10.0 
 MAX_ANALYSIS_WIDTH = 1280 
 
@@ -75,7 +75,7 @@ if uploaded_file:
     tfile_temp.close() 
 
     if "df" not in st.session_state or st.session_state.get("file_id") != uploaded_file.name: 
-        with st.spinner("低速チラつき抑制エンジンで解析中..."): 
+        with st.spinner("EMAトラッキングエンジンで解析中..."): 
             cap = cv2.VideoCapture(tfile_temp.name) 
             raw_fps = cap.get(cv2.CAP_PROP_FPS) or 30 
             fps = raw_fps * 4  
@@ -90,15 +90,15 @@ if uploaded_file:
             w = int(raw_w * scale_factor) 
             h = int(raw_h * scale_factor) 
 
-            data_log = []; total_angle, prev_angle = 0.0, None; last_valid_gx, last_valid_gy = np.nan, np.nan 
+            data_log = []; total_angle, prev_angle = 0.0, None 
+            last_valid_gx, last_valid_gy = np.nan, np.nan 
             
-            # --- 座標スムージング用のバッファ ---
-            bx_buffer, by_buffer = [], []
-            SMOOTH_WINDOW = 2 # 3フレームの平均をとる
+            # --- EMA (指数移動平均) 用パラメータ ---
+            last_bx, last_by = np.nan, np.nan
+            ALPHA = 0.7  # 最新値の重み。0.1〜0.9で調整。高いほどラグが減り、低いほど滑らか。
 
             L_G = (np.array([40, 50, 50]), np.array([90, 255, 255]))
             L_P_loose = (np.array([140, 25, 60]), np.array([180, 255, 255]))
-
             kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
 
             f_idx = 0 
@@ -108,14 +108,13 @@ if uploaded_file:
                  
                 frame = cv2.resize(frame_raw, (w, h)) if scale_factor < 1.0 else frame_raw 
                 
-                # --- 前処理：ガウスぼかしでピクセルノイズを平滑化 ---
-                blurred_frame = cv2.GaussianBlur(frame, (5, 5), 0)
-                hsv = cv2.cvtColor(blurred_frame, cv2.COLOR_BGR2HSV) 
+                # ノイズ低減のための軽いぼかし
+                blurred = cv2.GaussianBlur(frame, (5, 5), 0)
+                hsv = cv2.cvtColor(blurred, cv2.COLOR_BGR2HSV) 
 
-                # 1. 中心の緑を検出
+                # 1. 中心（緑）の検出
                 mask_g = cv2.inRange(hsv, L_G[0], L_G[1])
                 con_g, _ = cv2.findContours(mask_g, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE) 
-                
                 gx, gy = np.nan, np.nan 
                 if con_g: 
                     c = max(con_g, key=cv2.contourArea)
@@ -128,7 +127,7 @@ if uploaded_file:
                         gx, gy = last_valid_gx, last_valid_gy 
                 if not np.isnan(gx): last_valid_gx, last_valid_gy = gx, gy
 
-                # 2. ピンクの重心を検出し、移動平均を適用
+                # 2. ピンク（回転点）の検出 + EMAフィルタリング
                 bx, by = np.nan, np.nan 
                 if not np.isnan(gx): 
                     roi_mask = np.zeros((h, w), dtype=np.uint8)
@@ -142,24 +141,30 @@ if uploaded_file:
                     if con_p: 
                         cp = max(con_p, key=cv2.contourArea)
                         Mp = cv2.moments(cp) 
-                        if Mp["m00"] > 35: # チラつき防止のため閾値をわずかにアップ
+                        if Mp["m00"] > 30: 
                             raw_bx = Mp["m10"]/Mp["m00"]
                             raw_by = Mp["m01"]/Mp["m00"]
                             
-                            # バッファに保存
-                            bx_buffer.append(raw_bx)
-                            by_buffer.append(raw_by)
-                            if len(bx_buffer) > SMOOTH_WINDOW:
-                                bx_buffer.pop(0)
-                                by_buffer.pop(0)
-                            
-                            # 平均値を現在の座標として採用
-                            bx = sum(bx_buffer) / len(bx_buffer)
-                            by = sum(by_buffer) / len(by_buffer)
-                        else:
-                            bx_buffer.clear()
-                            by_buffer.clear()
+                            # A. 異常ジャンプ（ノイズ）の抑制
+                            if not np.isnan(last_bx):
+                                dist = np.sqrt((raw_bx - last_bx)**2 + (raw_by - last_by)**2)
+                                if dist > 60: # 前のフレームから60px以上飛んだらノイズと見なす
+                                    raw_bx, raw_by = last_bx, last_by
 
+                            # B. EMA (指数移動平均) ロジック
+                            if np.isnan(last_bx):
+                                bx, by = raw_bx, raw_by
+                            else:
+                                bx = ALPHA * raw_bx + (1 - ALPHA) * last_bx
+                                by = ALPHA * raw_by + (1 - ALPHA) * last_by
+                            
+                            last_bx, last_by = bx, by
+                        else:
+                            last_bx, last_by = np.nan, np.nan # 面積不足ならリセット
+                    else:
+                        last_bx, last_by = np.nan, np.nan
+
+                # 3. 角度計算
                 if not np.isnan(gx) and not np.isnan(bx): 
                     curr_a = np.arctan2(by - gy, bx - gx) 
                     if prev_angle is not None: 
@@ -184,7 +189,7 @@ if uploaded_file:
             st.session_state.video_meta = {"fps": fps, "raw_fps": raw_fps, "w": w, "h": h, "path": tfile_temp.name, "scale": scale_factor} 
             st.session_state.file_id = uploaded_file.name 
 
-    # --- UI & 表示ロジック ---
+    # --- UI & Graph Rendering ---
     df = st.session_state.df 
     st.sidebar.markdown("---") 
     t_max_limit = float(df["t"].max()) 
@@ -228,10 +233,8 @@ if uploaded_file:
     st.divider() 
     df_w = df[(df["t"] >= t1) & (df["t"] <= t2)] 
     if len(df_w) > 1: 
-        if hasattr(np, 'trapezoid'): 
-            w_val = np.trapezoid(df_w["F"], df_w["x"]) 
-        else: 
-            w_val = np.trapz(df_w["F"], df_w["x"]) 
+        if hasattr(np, 'trapezoid'): w_val = np.trapezoid(df_w["F"], df_w["x"]) 
+        else: w_val = np.trapz(df_w["F"], df_w["x"]) 
         st.latex(rf"W = {format_sci_latex(w_val)} \,\, \mathrm{{J}}") 
 
     if st.button(f"🎥 解析動画を生成して保存"): 
@@ -240,7 +243,7 @@ if uploaded_file:
         v_size = meta["w"] // 4 
         header_h = v_size + 100 
         font = cv2.FONT_HERSHEY_SIMPLEX 
-         
+        
         graph_configs = [ 
             {"xc": "t", "yc": "x", "xl": "t", "yl": "x", "xu": "s", "yu": "m", "col": "blue", "ymn": 0.0, "ymx": x_m, "xm": t_m}, 
             {"xc": "t", "yc": "v", "xl": "t", "yl": "v", "xu": "s", "yu": "m/s", "col": "red", "ymn": v_mi, "ymx": v_ma, "xm": t_m}, 
@@ -250,49 +253,32 @@ if uploaded_file:
 
         fourcc = cv2.VideoWriter_fourcc(*'mp4v') 
         out = cv2.VideoWriter(final_path, fourcc, meta["raw_fps"], (meta["w"], meta["h"] + header_h)) 
-         
         cap = cv2.VideoCapture(meta["path"]) 
         p_bar = st.progress(0.0) 
-        status_text = st.empty() 
-         
-        scale = meta.get("scale", 1.0) 
-
+        
         for i in range(len(df)): 
             ret, frame_raw = cap.read() 
             if not ret: break 
-             
-            frame = cv2.resize(frame_raw, (meta["w"], meta["h"])) if scale < 1.0 else frame_raw 
+            frame = cv2.resize(frame_raw, (meta["w"], meta["h"])) if meta.get("scale", 1.0) < 1.0 else frame_raw 
             canvas = np.zeros((meta["h"] + header_h, meta["w"], 3), dtype=np.uint8) 
             curr = df.iloc[i] 
             df_s = df.iloc[:i+1] 
              
             for idx, g in enumerate(graph_configs): 
-                g_img = create_graph_image(df_s, g["xc"], g["yc"], g["xl"], g["yl"], g["xu"], g["yu"], g["col"], v_size, g["xm"], g["ymn"], g["ymx"], shade_range=None, markers=None) 
+                g_img = create_graph_image(df_s, g["xc"], g["yc"], g["xl"], g["yl"], g["xu"], g["yu"], g["col"], v_size, g["xm"], g["ymn"], g["ymx"]) 
                 canvas[0:v_size, idx*v_size:(idx+1)*v_size] = g_img 
-                disp_unit = g.get("yu_cv", g["yu"])   
-                val_text = f"{g['yl']} = {curr[g['yc']]:>+7.3f} {disp_unit}" 
-                (tw, th), _ = cv2.getTextSize(val_text, font, 0.5, 1) 
-                cv2.putText(canvas, val_text, (idx*v_size + (v_size-tw)//2, v_size + 50), font, 0.5, (255,255,255), 1, cv2.LINE_AA) 
-             
-            t_text = f"t = {curr['t']:.2f} s" 
-            cv2.putText(frame, t_text, (20, 40), font, 1.0, (255,255,255), 2, cv2.LINE_AA) 
+                val_text = f"{g['yl']}={curr[g['yc']]:>+7.3f}" 
+                cv2.putText(canvas, val_text, (idx*v_size + 10, v_size + 40), font, 0.4, (255,255,255), 1, cv2.LINE_AA) 
              
             if not np.isnan(curr['gx']): 
-                cv2.circle(frame, (int(curr['gx']), int(curr['gy'])), search_range, (255,255,0), 1) 
                 cv2.circle(frame, (int(curr['gx']), int(curr['gy'])), 5, (0,255,0), -1) 
                 if not np.isnan(curr['bx']): 
                     cv2.circle(frame, (int(curr['bx']), int(curr['by'])), 5, (255,0,255), -1) 
              
             canvas[header_h:, :] = frame 
             out.write(canvas) 
-            if i % 10 == 0: 
-                p_bar.progress(i / len(df)) 
-                status_text.text(f"生成中: {i}/{len(df)} フレーム") 
+            if i % 20 == 0: p_bar.progress(i / len(df)) 
 
-        cap.release() 
-        out.release() 
-        p_bar.empty() 
-        status_text.success("✅ 動画生成が完了しました！") 
-         
+        cap.release(); out.release() 
         with open(final_path, "rb") as f: 
-            st.download_button("💾 完成した動画をダウンロード", f, file_name=f"analysis_v{VERSION}.mp4")
+            st.download_button("💾 解析動画をダウンロード", f, file_name=f"analysis_v{VERSION}.mp4")
