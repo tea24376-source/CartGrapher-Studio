@@ -12,7 +12,7 @@ import os
 plt.switch_backend('Agg') 
 plt.rcParams['mathtext.fontset'] = 'cm' 
 RADIUS_M = 0.016 
-VERSION = "2.7.9_Area_Fixed" 
+VERSION = "2.7.9_F-x_Only" 
 MAX_DURATION = 10.0 
 MAX_ANALYSIS_WIDTH = 1280 
 
@@ -33,10 +33,10 @@ def create_graph_image(df_sub, x_col, y_col, x_label, y_label, x_unit, y_unit, c
             ax.plot(df_sub[x_col], df_sub[y_col], color=color, linewidth=2, alpha=0.8) 
             ax.scatter(df_sub[x_col].iloc[-1], df_sub[y_col].iloc[-1], color=color, s=60, edgecolors='white', zorder=5) 
              
-            # --- 修正：塗りつぶしロジック (時間tを基準に判定) ---
+            # 修正点：shade_rangeが指定されている場合のみ塗りつぶしを実行
+            # (呼び出し側で F-x グラフの時だけ渡すように制御)
             if shade_range is not None: 
                 t_s, t_e = shade_range 
-                # df_subの中で、指定された時間tの範囲内にあるデータだけを抽出
                 mask = (df_sub['t'] >= t_s) & (df_sub['t'] <= t_e) 
                 if mask.any():
                     ax.fill_between(df_sub[x_col], df_sub[y_col], where=mask, color=color, alpha=0.3)
@@ -81,19 +81,11 @@ if uploaded_file:
             cap = cv2.VideoCapture(tfile_temp.name) 
             raw_fps = cap.get(cv2.CAP_PROP_FPS) or 30 
             fps = raw_fps * 4  
-             
-            raw_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) 
-            raw_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) 
-             
-            scale_factor = 1.0 
-            if raw_w > MAX_ANALYSIS_WIDTH: 
-                scale_factor = MAX_ANALYSIS_WIDTH / raw_w 
-             
-            w = int(raw_w * scale_factor) 
-            h = int(raw_h * scale_factor) 
+            raw_w, raw_h = int(cap.get(3)), int(cap.get(4))
+            scale_factor = MAX_ANALYSIS_WIDTH / raw_w if raw_w > MAX_ANALYSIS_WIDTH else 1.0
+            w, h = int(raw_w * scale_factor), int(raw_h * scale_factor)
 
             data_log = []; total_angle, prev_angle = 0.0, None; last_valid_gx, last_valid_gy = np.nan, np.nan 
-            
             L_G = (np.array([40, 50, 50]), np.array([90, 255, 255]))
             L_P_loose = (np.array([140, 25, 60]), np.array([180, 255, 255]))
             kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
@@ -102,45 +94,30 @@ if uploaded_file:
             while True: 
                 ret, frame_raw = cap.read() 
                 if not ret: break 
-                 
                 frame = cv2.resize(frame_raw, (w, h)) if scale_factor < 1.0 else frame_raw 
                 hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV) 
-
                 mask_g = cv2.inRange(hsv, L_G[0], L_G[1])
                 con_g, _ = cv2.findContours(mask_g, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE) 
-                
-                gx, gy = np.nan, np.nan 
-                current_search_range = 150 
-                
+                gx, gy, current_search_range = np.nan, np.nan, 150 
                 if con_g: 
                     c = max(con_g, key=cv2.contourArea)
-                    area = cv2.contourArea(c)
                     M = cv2.moments(c) 
                     if M["m00"] > 40: 
                         gx, gy = M["m10"]/M["m00"], M["m01"]/M["m00"] 
-                        green_r = np.sqrt(area / np.pi)
-                        current_search_range = int(green_r * 5.5)
-                
+                        current_search_range = int(np.sqrt(cv2.contourArea(c) / np.pi) * 5.5)
                 if not np.isnan(last_valid_gx) and not np.isnan(gx): 
-                    if np.sqrt((gx - last_valid_gx)**2 + (gy - last_valid_gy)**2) > 50: 
-                        gx, gy = last_valid_gx, last_valid_gy 
+                    if np.sqrt((gx - last_valid_gx)**2 + (gy - last_valid_gy)**2) > 50: gx, gy = last_valid_gx, last_valid_gy 
                 if not np.isnan(gx): last_valid_gx, last_valid_gy = gx, gy
 
                 bx, by = np.nan, np.nan 
                 if not np.isnan(gx): 
                     roi_mask = np.zeros((h, w), dtype=np.uint8)
                     cv2.circle(roi_mask, (int(gx), int(gy)), current_search_range, 255, -1)
-                    
-                    mask_p = cv2.inRange(hsv, L_P_loose[0], L_P_loose[1])
-                    mask_p_roi = cv2.bitwise_and(mask_p, roi_mask)
-                    mask_p_roi = cv2.morphologyEx(mask_p_roi, cv2.MORPH_CLOSE, kernel)
-                    
-                    con_p, _ = cv2.findContours(mask_p_roi, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE) 
+                    mask_p = cv2.bitwise_and(cv2.inRange(hsv, L_P_loose[0], L_P_loose[1]), roi_mask)
+                    con_p, _ = cv2.findContours(cv2.morphologyEx(mask_p, cv2.MORPH_CLOSE, kernel), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE) 
                     if con_p: 
-                        cp = max(con_p, key=cv2.contourArea)
-                        Mp = cv2.moments(cp) 
-                        if Mp["m00"] > 20: 
-                            bx, by = Mp["m10"]/Mp["m00"], Mp["m01"]/Mp["m00"] 
+                        Mp = cv2.moments(max(con_p, key=cv2.contourArea))
+                        if Mp["m00"] > 20: bx, by = Mp["m10"]/Mp["m00"], Mp["m01"]/Mp["m00"] 
 
                 if not np.isnan(gx) and not np.isnan(bx): 
                     curr_a = np.arctan2(by - gy, bx - gx) 
@@ -150,12 +127,7 @@ if uploaded_file:
                         elif diff < -np.pi: diff += 2*np.pi 
                         total_angle += diff 
                     prev_angle = curr_a 
-                 
-                data_log.append({
-                    "t": f_idx/fps, "x": total_angle*RADIUS_M, 
-                    "gx": gx, "gy": gy, "bx": bx, "by": by, 
-                    "roi": current_search_range
-                }) 
+                data_log.append({"t": f_idx/fps, "x": total_angle*RADIUS_M, "gx": gx, "gy": gy, "bx": bx, "by": by, "roi": current_search_range}) 
                 f_idx += 1 
 
             cap.release() 
@@ -165,23 +137,17 @@ if uploaded_file:
                 df["v"] = savgol_filter(df["x"].diff().fillna(0)*fps, 31, 2) 
                 df["a"] = savgol_filter(df["v"].diff().fillna(0)*fps, 31, 2)
                 df["F"] = mass_input * df["a"] 
-             
-            st.session_state.df = df;  
+            st.session_state.df, st.session_state.file_id = df, uploaded_file.name 
             st.session_state.video_meta = {"fps": fps, "raw_fps": raw_fps, "w": w, "h": h, "path": tfile_temp.name, "scale": scale_factor} 
-            st.session_state.file_id = uploaded_file.name 
 
     df = st.session_state.df 
     st.sidebar.markdown("---") 
-    t_max_limit = float(df["t"].max()) 
-    t1 = st.sidebar.number_input(r"開始時刻 $t_1$ [s]", 0.0, t_max_limit, 0.0, 0.01) 
-    row1 = df.iloc[(df['t']-t1).abs().argsort()[:1]] 
-    st.sidebar.markdown(rf"$x_1 = {row1['x'].values[0]:.3f} \,\, \mathrm{{m}}$") 
-    st.sidebar.markdown(rf"$v_1 = {row1['v'].values[0]:.3f} \,\, \mathrm{{m/s}}$") 
-    st.sidebar.markdown("---") 
-    t2 = st.sidebar.number_input(r"終了時刻 $t_2$ [s]", 0.0, t_max_limit, t_max_limit, 0.01) 
-    row2 = df.iloc[(df['t']-t2).abs().argsort()[:1]] 
-    st.sidebar.markdown(rf"$x_2 = {row2['x'].values[0]:.3f} \,\, \mathrm{{m}}$") 
-    st.sidebar.markdown(rf"$v_2 = {row2['v'].values[0]:.3f} \,\, \mathrm{{m/s}}$") 
+    t_m_lim = float(df["t"].max()) 
+    t1 = st.sidebar.number_input(r"開始時刻 $t_1$ [s]", 0.0, t_m_lim, 0.0, 0.01) 
+    t2 = st.sidebar.number_input(r"終了時刻 $t_2$ [s]", 0.0, t_m_lim, t_m_lim, 0.01) 
+    
+    r1, r2 = df.iloc[(df['t']-t1).abs().argsort()[:1]], df.iloc[(df['t']-t2).abs().argsort()[:1]] 
+    st.sidebar.markdown(rf"$x_1: {r1['x'].values[0]:.3f} \mathrm{{m}} \rightarrow x_2: {r2['x'].values[0]:.3f} \mathrm{{m}}$") 
 
     time_list = [round(t, 4) for t in df["t"].tolist()] 
     selected_t = st.select_slider("時刻をスキャン [s]", options=time_list, value=time_list[0]) 
@@ -193,32 +159,29 @@ if uploaded_file:
     f_mi, f_ma = float(df["F"].min()), float(df["F"].max()) 
 
     marker_times = [t1, t2] 
-    # 全てのグラフに shade_range を適用
-    shade_rng = (t1, t2)
+    df_disp = df.iloc[:time_idx+1]
 
-    r1c1, r1c2 = st.columns(2) 
-    with r1c1: 
-        st.image(create_graph_image(df.iloc[:time_idx+1], "t", "x", "t", "x", "s", "m", 'blue', 450, t_m, 0.0, x_m, shade_range=shade_rng, markers=marker_times), channels="BGR") 
+    c1, c2 = st.columns(2) 
+    with c1: 
+        st.image(create_graph_image(df_disp, "t", "x", "t", "x", "s", "m", 'blue', 450, t_m, 0.0, x_m, markers=marker_times), channels="BGR") 
         st.latex(rf"x = {curr_row['x']:.3f} \,\, \mathrm{{m}}") 
-    with r1c2: 
-        st.image(create_graph_image(df.iloc[:time_idx+1], "t", "v", "t", "v", "s", "m/s", 'red', 450, t_m, v_mi, v_ma, shade_range=shade_rng, markers=marker_times), channels="BGR") 
+    with c2: 
+        st.image(create_graph_image(df_disp, "t", "v", "t", "v", "s", "m/s", 'red', 450, t_m, v_mi, v_ma, markers=marker_times), channels="BGR") 
         st.latex(rf"v = {curr_row['v']:.3f} \,\, \mathrm{{m/s}}") 
 
-    r2c1, r2c2 = st.columns(2) 
-    with r2c1: 
-        st.image(create_graph_image(df.iloc[:time_idx+1], "t", "a", "t", "a", "s", "m/s²", 'green', 450, t_m, a_mi, a_ma, shade_range=shade_rng, markers=marker_times), channels="BGR") 
+    c3, c4 = st.columns(2) 
+    with c3: 
+        st.image(create_graph_image(df_disp, "t", "a", "t", "a", "s", "m/s²", 'green', 450, t_m, a_mi, a_ma, markers=marker_times), channels="BGR") 
         st.latex(rf"a = {curr_row['a']:.3f} \,\, \mathrm{{m/s^2}}") 
-    with r2c2: 
-        st.image(create_graph_image(df.iloc[:time_idx+1], "x", "F", "x", "F", "m", "N", 'purple', 450, x_m, f_mi, f_ma, shade_range=shade_rng, markers=marker_times), channels="BGR") 
+    with c4: 
+        # F-x グラフのみ shade_range を渡して塗りつぶす
+        st.image(create_graph_image(df_disp, "x", "F", "x", "F", "m", "N", 'purple', 450, x_m, f_mi, f_ma, shade_range=(t1, t2), markers=marker_times), channels="BGR") 
         st.latex(rf"F = {curr_row['F']:.3f} \,\, \mathrm{{N}}") 
 
     st.divider() 
     df_w = df[(df["t"] >= t1) & (df["t"] <= t2)] 
     if len(df_w) > 1: 
-        if hasattr(np, 'trapezoid'): 
-            w_val = np.trapezoid(df_w["F"], df_w["x"]) 
-        else: 
-            w_val = np.trapz(df_w["F"], df_w["x"]) 
+        w_val = np.trapz(df_w["F"], df_w["x"]) if not hasattr(np, 'trapezoid') else np.trapezoid(df_w["F"], df_w["x"])
         st.latex(rf"W = {format_sci_latex(w_val)} \,\, \mathrm{{J}}") 
 
     if st.button(f"🎥 解析動画を生成して保存"): 
@@ -229,38 +192,36 @@ if uploaded_file:
         font = cv2.FONT_HERSHEY_SIMPLEX 
          
         graph_configs = [ 
-            {"xc": "t", "yc": "x", "xl": "t", "yl": "x", "xu": "s", "yu": "m", "col": "blue", "ymn": 0.0, "ymx": x_m, "xm": t_m}, 
-            {"xc": "t", "yc": "v", "xl": "t", "yl": "v", "xu": "s", "yu": "m/s", "col": "red", "ymn": v_mi, "ymx": v_ma, "xm": t_m}, 
-            {"xc": "t", "yc": "a", "xl": "t", "yl": "a", "xu": "s", "yu": "m/s²", "yu_cv": "m/s^2", "col": "green", "ymn": a_mi, "ymx": a_ma, "xm": t_m}, 
-            {"xc": "x", "yc": "F", "xl": "x", "yl": "F", "xu": "m", "yu": "N", "col": "purple", "ymn": f_mi, "ymx": f_ma, "xm": x_m} 
+            {"xc": "t", "yc": "x", "xl": "t", "yl": "x", "xu": "s", "yu": "m", "col": "blue", "ymn": 0.0, "ymx": x_m, "xm": t_m, "shade": False}, 
+            {"xc": "t", "yc": "v", "xl": "t", "yl": "v", "xu": "s", "yu": "m/s", "col": "red", "ymn": v_mi, "ymx": v_ma, "xm": t_m, "shade": False}, 
+            {"xc": "t", "yc": "a", "xl": "t", "yl": "a", "xu": "s", "yu": "m/s²", "col": "green", "ymn": a_mi, "ymx": a_ma, "xm": t_m, "shade": False}, 
+            {"xc": "x", "yc": "F", "xl": "x", "yl": "F", "xu": "m", "yu": "N", "col": "purple", "ymn": f_mi, "ymx": f_ma, "xm": x_m, "shade": True} 
         ] 
 
         fourcc = cv2.VideoWriter_fourcc(*'mp4v') 
         out = cv2.VideoWriter(final_path, fourcc, meta["raw_fps"], (meta["w"], meta["h"] + header_h)) 
         cap = cv2.VideoCapture(meta["path"]) 
         p_bar = st.progress(0.0) 
-         
+        
         for i in range(len(df)): 
             ret, frame_raw = cap.read() 
             if not ret: break 
-            frame = cv2.resize(frame_raw, (meta["w"], meta["h"])) if meta.get("scale", 1.0) < 1.0 else frame_raw 
+            frame = cv2.resize(frame_raw, (meta["w"], meta["h"]))
             canvas = np.zeros((meta["h"] + header_h, meta["w"], 3), dtype=np.uint8) 
-            curr = df.iloc[i] 
-            df_s = df.iloc[:i+1] 
+            curr, df_s = df.iloc[i], df.iloc[:i+1] 
              
             for idx, g in enumerate(graph_configs): 
-                # 動画内でも色付けを反映
-                g_img = create_graph_image(df_s, g["xc"], g["yc"], g["xl"], g["yl"], g["xu"], g["yu"], g["col"], v_size, g["xm"], g["ymn"], g["ymx"], shade_range=shade_rng, markers=marker_times) 
+                # F-x (shade=True) の時だけ shade_range を渡す
+                s_rng = (t1, t2) if g["shade"] else None 
+                g_img = create_graph_image(df_s, g["xc"], g["yc"], g["xl"], g["yl"], g["xu"], g["yu"], g["col"], v_size, g["xm"], g["ymn"], g["ymx"], shade_range=s_rng, markers=marker_times) 
                 canvas[0:v_size, idx*v_size:(idx+1)*v_size] = g_img 
-                val_text = f"{g['yl']} = {curr[g['yc']]:>+7.3f}" 
-                cv2.putText(canvas, val_text, (idx*v_size + 10, v_size + 50), font, 0.5, (255,255,255), 1) 
+                cv2.putText(canvas, f"{g['yl']}={curr[g['yc']]:.3f}", (idx*v_size + 10, v_size + 50), font, 0.5, (255,255,255), 1) 
              
-            cv2.putText(frame, f"t = {curr['t']:.2f} s", (20, 40), font, 1.0, (255,255,255), 2) 
+            cv2.putText(frame, f"t={curr['t']:.2f}s", (20, 40), font, 1.0, (255,255,255), 2) 
             if not np.isnan(curr['gx']): 
                 cv2.circle(frame, (int(curr['gx']), int(curr['gy'])), int(curr['roi']), (255,255,0), 1) 
                 cv2.circle(frame, (int(curr['gx']), int(curr['gy'])), 5, (0,255,0), -1) 
-                if not np.isnan(curr['bx']): 
-                    cv2.circle(frame, (int(curr['bx']), int(curr['by'])), 5, (255,0,255), -1) 
+                if not np.isnan(curr['bx']): cv2.circle(frame, (int(curr['bx']), int(curr['by'])), 5, (255,0,255), -1) 
              
             canvas[header_h:, :] = frame 
             out.write(canvas) 
@@ -268,4 +229,4 @@ if uploaded_file:
 
         cap.release(); out.release() 
         with open(final_path, "rb") as f: 
-            st.download_button("💾 完成した動画をダウンロード", f, file_name=f"analysis_v{VERSION}.mp4")
+            st.download_button("💾 完成動画を保存", f, file_name=f"analysis_v{VERSION}.mp4")
