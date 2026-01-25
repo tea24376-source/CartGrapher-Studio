@@ -7,14 +7,15 @@ import tempfile
 import matplotlib.pyplot as plt 
 import io 
 import os 
+import gc  # メモリ解放用に追加
 
 # --- 基本設定 --- 
 plt.switch_backend('Agg') 
 plt.rcParams['mathtext.fontset'] = 'cm' 
 RADIUS_M = 0.016 
-VERSION = "2.7.8_Final_Area" 
+VERSION = "2.7.9_Stable" 
 MAX_DURATION = 10.0 
-MAX_ANALYSIS_WIDTH = 1280 
+MAX_ANALYSIS_WIDTH = 640  # 1280から640へ変更
 
 def format_sci_latex(val): 
     try: 
@@ -39,7 +40,6 @@ def create_graph_image(df_sub, x_col, y_col, x_label, y_label, x_unit, y_unit, c
                     if not m_row.empty: 
                         ax.scatter(m_row[x_col].values[0], m_row[y_col].values[0], color='orange', s=50, marker='o', edgecolors='black', zorder=10) 
 
-            # F-xグラフ（y_col == 'F'）の時だけ指定範囲を塗りつぶす
             if shade_range is not None and y_col == 'F': 
                 t_s, t_e = shade_range 
                 mask = (df_sub['t'] >= t_s) & (df_sub['t'] <= t_e) 
@@ -77,59 +77,64 @@ if uploaded_file:
     if "df" not in st.session_state or st.session_state.get("file_id") != uploaded_file.name: 
         with st.spinner("解析中..."): 
             cap = cv2.VideoCapture(tfile_temp.name) 
-            raw_fps = cap.get(cv2.CAP_PROP_FPS) or 30 
-            fps = raw_fps * 4  
-            raw_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) 
-            raw_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) 
-            scale_factor = MAX_ANALYSIS_WIDTH / raw_w if raw_w > MAX_ANALYSIS_WIDTH else 1.0 
-            w, h = int(raw_w * scale_factor), int(raw_h * scale_factor) 
+            try:
+                raw_fps = cap.get(cv2.CAP_PROP_FPS) or 30 
+                fps = raw_fps * 4  
+                raw_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) 
+                raw_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) 
+                scale_factor = MAX_ANALYSIS_WIDTH / raw_w if raw_w > MAX_ANALYSIS_WIDTH else 1.0 
+                w, h = int(raw_w * scale_factor), int(raw_h * scale_factor) 
 
-            data_log = []; total_angle, prev_angle = 0.0, None; last_valid_gx, last_valid_gy = np.nan, np.nan 
-            L_G = (np.array([40, 50, 50]), np.array([90, 255, 255]))
-            L_P_loose = (np.array([140, 25, 60]), np.array([180, 255, 255]))
-            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+                data_log = []; total_angle, prev_angle = 0.0, None; last_valid_gx, last_valid_gy = np.nan, np.nan 
+                L_G = (np.array([40, 50, 50]), np.array([90, 255, 255]))
+                L_P_loose = (np.array([140, 25, 60]), np.array([180, 255, 255]))
+                kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
 
-            f_idx = 0 
-            while True: 
-                ret, frame_raw = cap.read() 
-                if not ret: break 
-                frame = cv2.resize(frame_raw, (w, h)) if scale_factor < 1.0 else frame_raw 
-                hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV) 
-                mask_g = cv2.inRange(hsv, L_G[0], L_G[1])
-                con_g, _ = cv2.findContours(mask_g, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE) 
-                gx, gy, current_search_range = np.nan, np.nan, 150 
-                if con_g: 
-                    c = max(con_g, key=cv2.contourArea)
-                    M = cv2.moments(c) 
-                    if M["m00"] > 40: 
-                        gx, gy = M["m10"]/M["m00"], M["m01"]/M["m00"] 
-                        current_search_range = int(np.sqrt(cv2.contourArea(c) / np.pi) * 5.5)
-                if not np.isnan(last_valid_gx) and not np.isnan(gx): 
-                    if np.sqrt((gx - last_valid_gx)**2 + (gy - last_valid_gy)**2) > 50: gx, gy = last_valid_gx, last_valid_gy 
-                if not np.isnan(gx): last_valid_gx, last_valid_gy = gx, gy
+                f_idx = 0 
+                while True: 
+                    ret, frame_raw = cap.read() 
+                    if not ret: break 
+                    frame = cv2.resize(frame_raw, (w, h)) if scale_factor < 1.0 else frame_raw 
+                    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV) 
+                    mask_g = cv2.inRange(hsv, L_G[0], L_G[1])
+                    con_g, _ = cv2.findContours(mask_g, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE) 
+                    gx, gy, current_search_range = np.nan, np.nan, 150 
+                    if con_g: 
+                        c = max(con_g, key=cv2.contourArea)
+                        M = cv2.moments(c) 
+                        if M["m00"] > 40: 
+                            gx, gy = M["m10"]/M["m00"], M["m01"]/M["m00"] 
+                            current_search_range = int(np.sqrt(cv2.contourArea(c) / np.pi) * 5.5)
+                    if not np.isnan(last_valid_gx) and not np.isnan(gx): 
+                        if np.sqrt((gx - last_valid_gx)**2 + (gy - last_valid_gy)**2) > 50: gx, gy = last_valid_gx, last_valid_gy 
+                    if not np.isnan(gx): last_valid_gx, last_valid_gy = gx, gy
 
-                bx, by = np.nan, np.nan 
-                if not np.isnan(gx): 
-                    roi_mask = np.zeros((h, w), dtype=np.uint8)
-                    cv2.circle(roi_mask, (int(gx), int(gy)), current_search_range, 255, -1)
-                    mask_p = cv2.bitwise_and(cv2.inRange(hsv, L_P_loose[0], L_P_loose[1]), roi_mask)
-                    con_p, _ = cv2.findContours(cv2.morphologyEx(mask_p, cv2.MORPH_CLOSE, kernel), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE) 
-                    if con_p: 
-                        Mp = cv2.moments(max(con_p, key=cv2.contourArea))
-                        if Mp["m00"] > 20: bx, by = Mp["m10"]/Mp["m00"], Mp["m01"]/Mp["m00"] 
+                    bx, by = np.nan, np.nan 
+                    if not np.isnan(gx): 
+                        roi_mask = np.zeros((h, w), dtype=np.uint8)
+                        cv2.circle(roi_mask, (int(gx), int(gy)), current_search_range, 255, -1)
+                        mask_p = cv2.bitwise_and(cv2.inRange(hsv, L_P_loose[0], L_P_loose[1]), roi_mask)
+                        con_p, _ = cv2.findContours(cv2.morphologyEx(mask_p, cv2.MORPH_CLOSE, kernel), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE) 
+                        if con_p: 
+                            Mp = cv2.moments(max(con_p, key=cv2.contourArea))
+                            if Mp["m00"] > 20: bx, by = Mp["m10"]/Mp["m00"], Mp["m01"]/Mp["m00"] 
 
-                if not np.isnan(gx) and not np.isnan(bx): 
-                    curr_a = np.arctan2(by - gy, bx - gx) 
-                    if prev_angle is not None: 
-                        diff = curr_a - prev_angle 
-                        if diff > np.pi: diff -= 2*np.pi 
-                        elif diff < -np.pi: diff += 2*np.pi 
-                        total_angle += diff 
-                    prev_angle = curr_a 
-                data_log.append({"t": f_idx/fps, "x": total_angle*RADIUS_M, "gx": gx, "gy": gy, "bx": bx, "by": by, "roi": current_search_range}) 
-                f_idx += 1 
+                    if not np.isnan(gx) and not np.isnan(bx): 
+                        curr_a = np.arctan2(by - gy, bx - gx) 
+                        if prev_angle is not None: 
+                            diff = curr_a - prev_angle 
+                            if diff > np.pi: diff -= 2*np.pi 
+                            elif diff < -np.pi: diff += 2*np.pi 
+                            total_angle += diff 
+                        prev_angle = curr_a 
+                    data_log.append({"t": f_idx/fps, "x": total_angle*RADIUS_M, "gx": gx, "gy": gy, "bx": bx, "by": by, "roi": current_search_range}) 
+                    f_idx += 1 
+                    # メモリ解放
+                    del frame_raw; del frame; del hsv
+            finally:
+                cap.release() 
+                gc.collect()
 
-            cap.release() 
             df = pd.DataFrame(data_log).interpolate().ffill().bfill() 
             if len(df) > 31: 
                 df["x"] = savgol_filter(df["x"], 15, 2)
@@ -177,7 +182,6 @@ if uploaded_file:
         st.image(create_graph_image(df_sub, "t", "a", "t", "a", "s", "m/s²", 'green', 450, t_m, a_mi, a_ma, markers=marker_times), channels="BGR") 
         st.latex(rf"a = {curr_row['a']:.3f} \,\, \mathrm{{m/s^2}}") 
     with r2c2: 
-        # F-xグラフのみ shade_range を渡す
         st.image(create_graph_image(df_sub, "x", "F", "x", "F", "m", "N", 'purple', 450, x_m, f_mi, f_ma, shade_range=(t1, t2), markers=marker_times), channels="BGR") 
         st.latex(rf"F = {curr_row['F']:.3f} \,\, \mathrm{{N}}") 
 
@@ -195,34 +199,37 @@ if uploaded_file:
         fourcc = cv2.VideoWriter_fourcc(*'mp4v') 
         out = cv2.VideoWriter(final_path, fourcc, meta["raw_fps"], (meta["w"], meta["h"] + header_h)) 
         cap = cv2.VideoCapture(meta["path"]) 
-        p_bar, status_text = st.progress(0.0), st.empty() 
+        try:
+            p_bar, status_text = st.progress(0.0), st.empty() 
+            graph_configs = [ 
+                {"xc": "t", "yc": "x", "xl": "t", "yl": "x", "xu": "s", "yu": "m", "col": "blue", "ymn": 0.0, "ymx": x_m, "xm": t_m, "s": False}, 
+                {"xc": "t", "yc": "v", "xl": "t", "yl": "v", "xu": "s", "yu": "m/s", "col": "red", "ymn": v_mi, "ymx": v_ma, "xm": t_m, "s": False}, 
+                {"xc": "t", "yc": "a", "xl": "t", "yl": "a", "xu": "s", "yu": "m/s²", "col": "green", "ymn": a_mi, "ymx": a_ma, "xm": t_m, "s": False}, 
+                {"xc": "x", "yc": "F", "xl": "x", "yl": "F", "xu": "m", "yu": "N", "col": "purple", "ymn": f_mi, "ymx": f_ma, "xm": x_m, "s": True} 
+            ] 
 
-        graph_configs = [ 
-            {"xc": "t", "yc": "x", "xl": "t", "yl": "x", "xu": "s", "yu": "m", "col": "blue", "ymn": 0.0, "ymx": x_m, "xm": t_m, "s": False}, 
-            {"xc": "t", "yc": "v", "xl": "t", "yl": "v", "xu": "s", "yu": "m/s", "col": "red", "ymn": v_mi, "ymx": v_ma, "xm": t_m, "s": False}, 
-            {"xc": "t", "yc": "a", "xl": "t", "yl": "a", "xu": "s", "yu": "m/s²", "col": "green", "ymn": a_mi, "ymx": a_ma, "xm": t_m, "s": False}, 
-            {"xc": "x", "yc": "F", "xl": "x", "yl": "F", "xu": "m", "yu": "N", "col": "purple", "ymn": f_mi, "ymx": f_ma, "xm": x_m, "s": True} 
-        ] 
-
-        for i in range(len(df)): 
-            ret, frame_raw = cap.read() 
-            if not ret: break 
-            frame = cv2.resize(frame_raw, (meta["w"], meta["h"]))
-            canvas = np.zeros((meta["h"] + header_h, meta["w"], 3), dtype=np.uint8) 
-            curr, df_s = df.iloc[i], df.iloc[:i+1] 
-            for idx, g in enumerate(graph_configs): 
-                sr = (t1, t2) if g["s"] else None 
-                g_img = create_graph_image(df_s, g["xc"], g["yc"], g["xl"], g["yl"], g["xu"], g["yu"], g["col"], v_size, g["xm"], g["ymn"], g["ymx"], shade_range=sr, markers=marker_times) 
-                canvas[0:v_size, idx*v_size:(idx+1)*v_size] = g_img 
-                val_t = f"{g['yl']}={curr[g['yc']]:.3f}" 
-                cv2.putText(canvas, val_t, (idx*v_size + 10, v_size + 50), font, 0.5, (255,255,255), 1) 
-            cv2.putText(frame, f"t={curr['t']:.2f}s", (20, 40), font, 1.0, (255,255,255), 2) 
-            if not np.isnan(curr['gx']): 
-                cv2.circle(frame, (int(curr['gx']), int(curr['gy'])), int(curr['roi']), (255,255,0), 1) 
-                cv2.circle(frame, (int(curr['gx']), int(curr['gy'])), 5, (0,255,0), -1) 
-                if not np.isnan(curr['bx']): cv2.circle(frame, (int(curr['bx']), int(curr['by'])), 5, (255,0,255), -1) 
-            canvas[header_h:, :] = frame 
-            out.write(canvas) 
-            if i % 10 == 0: p_bar.progress(i / len(df)) 
-        cap.release(); out.release() 
+            for i in range(len(df)): 
+                ret, frame_raw = cap.read() 
+                if not ret: break 
+                frame = cv2.resize(frame_raw, (meta["w"], meta["h"]))
+                canvas = np.zeros((meta["h"] + header_h, meta["w"], 3), dtype=np.uint8) 
+                curr, df_s = df.iloc[i], df.iloc[:i+1] 
+                for idx, g in enumerate(graph_configs): 
+                    sr = (t1, t2) if g["s"] else None 
+                    g_img = create_graph_image(df_s, g["xc"], g["yc"], g["xl"], g["yl"], g["xu"], g["yu"], g["col"], v_size, g["xm"], g["ymn"], g["ymx"], shade_range=sr, markers=marker_times) 
+                    canvas[0:v_size, idx*v_size:(idx+1)*v_size] = g_img 
+                    val_t = f"{g['yl']}={curr[g['yc']]:.3f}" 
+                    cv2.putText(canvas, val_t, (idx*v_size + 10, v_size + 50), font, 0.5, (255,255,255), 1) 
+                cv2.putText(frame, f"t={curr['t']:.2f}s", (20, 40), font, 1.0, (255,255,255), 2) 
+                if not np.isnan(curr['gx']): 
+                    cv2.circle(frame, (int(curr['gx']), int(curr['gy'])), int(curr['roi']), (255,255,0), 1) 
+                    cv2.circle(frame, (int(curr['gx']), int(curr['gy'])), 5, (0,255,0), -1) 
+                    if not np.isnan(curr['bx']): cv2.circle(frame, (int(curr['bx']), int(curr['by'])), 5, (255,0,255), -1) 
+                canvas[header_h:, :] = frame 
+                out.write(canvas) 
+                if i % 10 == 0: p_bar.progress(i / len(df)) 
+                del frame_raw; del frame; del canvas
+        finally:
+            cap.release(); out.release() 
+            gc.collect()
         with open(final_path, "rb") as f: st.download_button("💾 完成した動画をダウンロード", f, file_name=f"analysis.mp4")
