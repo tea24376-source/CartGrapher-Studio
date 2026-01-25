@@ -12,7 +12,7 @@ import os
 plt.switch_backend('Agg') 
 plt.rcParams['mathtext.fontset'] = 'cm' 
 RADIUS_M = 0.016 
-VERSION = "2.7.0_BlackWheel_Optimized" 
+VERSION = "2.7.5_MotionBlur_Optimized" 
 MAX_DURATION = 10.0 
 MAX_ANALYSIS_WIDTH = 1280 
 
@@ -65,7 +65,7 @@ st.title(f"🚀 CartGrapher Studio ver {VERSION}")
 
 st.sidebar.header("解析設定") 
 mass_input = st.sidebar.number_input("台車の質量 $m$ [kg]", value=0.100, min_value=0.001, format="%.3f", step=0.001) 
-search_range = 150 # ピンクを探す範囲 [px]
+search_range = 150 # 緑（中心）からピンクを探す半径 [px]
 
 uploaded_file = st.file_uploader("動画をアップロード (10秒以内)", type=["mp4", "mov"]) 
 
@@ -75,7 +75,7 @@ if uploaded_file:
     tfile_temp.close() 
 
     if "df" not in st.session_state or st.session_state.get("file_id") != uploaded_file.name: 
-        with st.spinner("黒ホイール最適化エンジンで解析中..."): 
+        with st.spinner("高速回転・ブレ対策エンジンで解析中..."): 
             cap = cv2.VideoCapture(tfile_temp.name) 
             raw_fps = cap.get(cv2.CAP_PROP_FPS) or 30 
             fps = raw_fps * 4  
@@ -92,11 +92,14 @@ if uploaded_file:
 
             data_log = []; total_angle, prev_angle = 0.0, None; last_valid_gx, last_valid_gy = np.nan, np.nan 
             
-            # --- 画像から抽出した最適HSV閾値 ---
-            # 緑 (中心軸): 少し明るい緑から深い緑まで
+            # --- カラー設定 ---
+            # 緑 (中心軸): 安定しているため標準的な範囲
             L_G = (np.array([40, 50, 50]), np.array([90, 255, 255]))
-            # ピンク (回転点): 黒背景で色が浮きやすいため少し彩度範囲を広げる
-            L_P = (np.array([140, 40, 80]), np.array([175, 255, 255]))
+            # ピンク (回転点): ブレ対策として彩度(S)と明度(V)の下限を大幅に緩和
+            L_P_loose = (np.array([140, 25, 60]), np.array([180, 255, 255]))
+
+            # モルフォロジー変換用カーネル（穴埋め用）
+            kernel = np.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
 
             f_idx = 0 
             while True: 
@@ -106,7 +109,7 @@ if uploaded_file:
                 frame = cv2.resize(frame_raw, (w, h)) if scale_factor < 1.0 else frame_raw 
                 hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV) 
 
-                # 1. まず緑（中心軸）を探す
+                # 1. 緑（中心軸）の検出
                 mask_g = cv2.inRange(hsv, L_G[0], L_G[1])
                 con_g, _ = cv2.findContours(mask_g, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE) 
                 
@@ -114,36 +117,38 @@ if uploaded_file:
                 if con_g: 
                     c = max(con_g, key=cv2.contourArea)
                     M = cv2.moments(c) 
-                    if M["m00"] > 50: # ノイズ除去
+                    if M["m00"] > 40: 
                         gx, gy = M["m10"]/M["m00"], M["m01"]/M["m00"] 
                 
-                # 前のフレームからの急激な移動を抑制
+                # 中心座標の補間（急激な飛びを抑制）
                 if not np.isnan(last_valid_gx) and not np.isnan(gx): 
-                    if np.sqrt((gx - last_valid_gx)**2 + (gy - last_valid_gy)**2) > 80: 
+                    if np.sqrt((gx - last_valid_gx)**2 + (gy - last_valid_gy)**2) > 50: 
                         gx, gy = last_valid_gx, last_valid_gy 
-                
-                if not np.isnan(gx):
-                    last_valid_gx, last_valid_gy = gx, gy
+                if not np.isnan(gx): last_valid_gx, last_valid_gy = gx, gy
 
-                # 2. 緑の中心から150pxの範囲（マスク）でピンクを探す
+                # 2. ピンク（回転点）の検出：重心(Moments)ベース
                 bx, by = np.nan, np.nan 
                 if not np.isnan(gx): 
-                    # 限定範囲のマスク作成
+                    # 探索範囲の限定（ROIマスク）
                     roi_mask = np.zeros((h, w), dtype=np.uint8)
                     cv2.circle(roi_mask, (int(gx), int(gy)), search_range, 255, -1)
                     
-                    # ピンクの抽出（範囲限定）
-                    mask_p = cv2.inRange(hsv, L_P[0], L_P[1])
+                    # マスク適用
+                    mask_p = cv2.inRange(hsv, L_P_loose[0], L_P_loose[1])
                     mask_p_roi = cv2.bitwise_and(mask_p, roi_mask)
+                    
+                    # ブレで千切れた領域を繋ぐ（クロージング処理）
+                    mask_p_roi = cv2.morphologyEx(mask_p_roi, cv2.MORPH_CLOSE, kernel)
                     
                     con_p, _ = cv2.findContours(mask_p_roi, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE) 
                     if con_p: 
+                        # 最も面積が大きい塊の重心を取得
                         cp = max(con_p, key=cv2.contourArea)
                         Mp = cv2.moments(cp) 
-                        if Mp["m00"] > 30: 
+                        if Mp["m00"] > 20: # ブレて薄くなっても20px以上あれば重心をとる
                             bx, by = Mp["m10"]/Mp["m00"], Mp["m01"]/Mp["m00"] 
 
-                # 3. 角度計算
+                # 3. 回転角の積算
                 if not np.isnan(gx) and not np.isnan(bx): 
                     curr_a = np.arctan2(by - gy, bx - gx) 
                     if prev_angle is not None: 
@@ -159,13 +164,17 @@ if uploaded_file:
             cap.release() 
             df = pd.DataFrame(data_log).interpolate().ffill().bfill() 
             if len(df) > 31: 
-                df["x"] = savgol_filter(df["x"], 15, 2); df["v"] = savgol_filter(df["x"].diff().fillna(0)*fps, 31, 2) 
-                df["a"] = savgol_filter(df["v"].diff().fillna(0)*fps, 31, 2); df["F"] = mass_input * df["a"] 
+                # Savitzky-Golayフィルタで滑らかに（微分ノイズ対策）
+                df["x"] = savgol_filter(df["x"], 15, 2)
+                df["v"] = savgol_filter(df["x"].diff().fillna(0)*fps, 31, 2) 
+                df["a"] = savgol_filter(df["v"].diff().fillna(0)*fps, 31, 2)
+                df["F"] = mass_input * df["a"] 
              
             st.session_state.df = df;  
             st.session_state.video_meta = {"fps": fps, "raw_fps": raw_fps, "w": w, "h": h, "path": tfile_temp.name, "scale": scale_factor} 
             st.session_state.file_id = uploaded_file.name 
 
+    # --- 以下、UI・グラフ表示・動画生成ロジック（変更なし） ---
     df = st.session_state.df 
     st.sidebar.markdown("---") 
     t_max_limit = float(df["t"].max()) 
@@ -243,7 +252,6 @@ if uploaded_file:
             if not ret: break 
              
             frame = cv2.resize(frame_raw, (meta["w"], meta["h"])) if scale < 1.0 else frame_raw 
-             
             canvas = np.zeros((meta["h"] + header_h, meta["w"], 3), dtype=np.uint8) 
             curr = df.iloc[i] 
             df_s = df.iloc[:i+1] 
@@ -251,10 +259,8 @@ if uploaded_file:
             for idx, g in enumerate(graph_configs): 
                 g_img = create_graph_image(df_s, g["xc"], g["yc"], g["xl"], g["yl"], g["xu"], g["yu"], g["col"], v_size, g["xm"], g["ymn"], g["ymx"], shade_range=None, markers=None) 
                 canvas[0:v_size, idx*v_size:(idx+1)*v_size] = g_img 
-                 
                 disp_unit = g.get("yu_cv", g["yu"])   
                 val_text = f"{g['yl']} = {curr[g['yc']]:>+7.3f} {disp_unit}" 
-                 
                 (tw, th), _ = cv2.getTextSize(val_text, font, 0.5, 1) 
                 cv2.putText(canvas, val_text, (idx*v_size + (v_size-tw)//2, v_size + 50), font, 0.5, (255,255,255), 1, cv2.LINE_AA) 
              
@@ -262,13 +268,10 @@ if uploaded_file:
             cv2.putText(frame, t_text, (20, 40), font, 1.0, (255,255,255), 2, cv2.LINE_AA) 
              
             if not np.isnan(curr['gx']): 
-                # 探索範囲を表示（水色の円）
-                cv2.circle(frame, (int(curr['gx']), int(curr['gy'])), search_range, (255,255,0), 1) 
-                # 中心（緑）をプロット
-                cv2.circle(frame, (int(curr['gx']), int(curr['gy'])), 5, (0,255,0), -1) 
+                cv2.circle(frame, (int(curr['gx']), int(curr['gy'])), search_range, (255,255,0), 1) # 探索円
+                cv2.circle(frame, (int(curr['gx']), int(curr['gy'])), 5, (0,255,0), -1) # 中心点
                 if not np.isnan(curr['bx']): 
-                    # 回転点（ピンク）をプロット
-                    cv2.circle(frame, (int(curr['bx']), int(curr['by'])), 5, (255,0,255), -1) 
+                    cv2.circle(frame, (int(curr['bx']), int(curr['by'])), 5, (255,0,255), -1) # 回転点
              
             canvas[header_h:, :] = frame 
             out.write(canvas) 
