@@ -12,7 +12,7 @@ import os
 plt.switch_backend('Agg') 
 plt.rcParams['mathtext.fontset'] = 'cm' 
 RADIUS_M = 0.016 
-VERSION = "2.7.7_Dynamic_ROI" 
+VERSION = "2.7.9_Area_Fixed" 
 MAX_DURATION = 10.0 
 MAX_ANALYSIS_WIDTH = 1280 
 
@@ -33,17 +33,20 @@ def create_graph_image(df_sub, x_col, y_col, x_label, y_label, x_unit, y_unit, c
             ax.plot(df_sub[x_col], df_sub[y_col], color=color, linewidth=2, alpha=0.8) 
             ax.scatter(df_sub[x_col].iloc[-1], df_sub[y_col].iloc[-1], color=color, s=60, edgecolors='white', zorder=5) 
              
+            # --- 修正：塗りつぶしロジック (時間tを基準に判定) ---
+            if shade_range is not None: 
+                t_s, t_e = shade_range 
+                # df_subの中で、指定された時間tの範囲内にあるデータだけを抽出
+                mask = (df_sub['t'] >= t_s) & (df_sub['t'] <= t_e) 
+                if mask.any():
+                    ax.fill_between(df_sub[x_col], df_sub[y_col], where=mask, color=color, alpha=0.3)
+
             if markers is not None: 
                 for t_val in markers: 
                     m_row = df_sub.iloc[(df_sub['t']-t_val).abs().argsort()[:1]] 
                     if not m_row.empty: 
-                        ax.scatter(m_row[x_col], m_row[y_col], color='orange', s=50, marker='o', edgecolors='black', zorder=10) 
+                        ax.scatter(m_row[x_col].values[0], m_row[y_col].values[0], color='orange', s=50, marker='o', edgecolors='black', zorder=10) 
 
-            if shade_range is not None and y_col == 'F': 
-                t_s, t_e = shade_range 
-                mask = (df_sub['t'] >= t_s) & (df_sub['t'] <= t_e) 
-                ax.fill_between(df_sub[x_col], df_sub[y_col], where=mask, color=color, alpha=0.3) 
-         
         ax.set_title(f"${y_label}$ - ${x_label}$", fontsize=14, fontweight='bold') 
         ax.set_xlabel(f"${x_label}$ [{x_unit}]", fontsize=11) 
         ax.set_ylabel(f"${y_label}$ [{y_unit}]", fontsize=11) 
@@ -65,7 +68,6 @@ st.title(f"🚀 CartGrapher Studio ver {VERSION}")
 
 st.sidebar.header("解析設定") 
 mass_input = st.sidebar.number_input("台車の質量 $m$ [kg]", value=0.100, min_value=0.001, format="%.3f", step=0.001) 
-# search_range = 150  # 固定値から動的計算へ変更
 
 uploaded_file = st.file_uploader("動画をアップロード (10秒以内)", type=["mp4", "mov"]) 
 
@@ -91,7 +93,6 @@ if uploaded_file:
             h = int(raw_h * scale_factor) 
 
             data_log = []; total_angle, prev_angle = 0.0, None; last_valid_gx, last_valid_gy = np.nan, np.nan 
-            dynamic_roi_list = [] # 描画用に保存
             
             L_G = (np.array([40, 50, 50]), np.array([90, 255, 255]))
             L_P_loose = (np.array([140, 25, 60]), np.array([180, 255, 255]))
@@ -109,7 +110,7 @@ if uploaded_file:
                 con_g, _ = cv2.findContours(mask_g, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE) 
                 
                 gx, gy = np.nan, np.nan 
-                current_search_range = 150 # デフォルト
+                current_search_range = 150 
                 
                 if con_g: 
                     c = max(con_g, key=cv2.contourArea)
@@ -117,7 +118,6 @@ if uploaded_file:
                     M = cv2.moments(c) 
                     if M["m00"] > 40: 
                         gx, gy = M["m10"]/M["m00"], M["m01"]/M["m00"] 
-                        # 緑の面積から半径を逆算 (Area = pi * r^2) し、その5.5倍を探索窓にする
                         green_r = np.sqrt(area / np.pi)
                         current_search_range = int(green_r * 5.5)
                 
@@ -193,21 +193,23 @@ if uploaded_file:
     f_mi, f_ma = float(df["F"].min()), float(df["F"].max()) 
 
     marker_times = [t1, t2] 
+    # 全てのグラフに shade_range を適用
+    shade_rng = (t1, t2)
 
     r1c1, r1c2 = st.columns(2) 
     with r1c1: 
-        st.image(create_graph_image(df.iloc[:time_idx+1], "t", "x", "t", "x", "s", "m", 'blue', 450, t_m, 0.0, x_m, markers=marker_times), channels="BGR") 
+        st.image(create_graph_image(df.iloc[:time_idx+1], "t", "x", "t", "x", "s", "m", 'blue', 450, t_m, 0.0, x_m, shade_range=shade_rng, markers=marker_times), channels="BGR") 
         st.latex(rf"x = {curr_row['x']:.3f} \,\, \mathrm{{m}}") 
     with r1c2: 
-        st.image(create_graph_image(df.iloc[:time_idx+1], "t", "v", "t", "v", "s", "m/s", 'red', 450, t_m, v_mi, v_ma, markers=marker_times), channels="BGR") 
+        st.image(create_graph_image(df.iloc[:time_idx+1], "t", "v", "t", "v", "s", "m/s", 'red', 450, t_m, v_mi, v_ma, shade_range=shade_rng, markers=marker_times), channels="BGR") 
         st.latex(rf"v = {curr_row['v']:.3f} \,\, \mathrm{{m/s}}") 
 
     r2c1, r2c2 = st.columns(2) 
     with r2c1: 
-        st.image(create_graph_image(df.iloc[:time_idx+1], "t", "a", "t", "a", "s", "m/s²", 'green', 450, t_m, a_mi, a_ma, markers=marker_times), channels="BGR") 
+        st.image(create_graph_image(df.iloc[:time_idx+1], "t", "a", "t", "a", "s", "m/s²", 'green', 450, t_m, a_mi, a_ma, shade_range=shade_rng, markers=marker_times), channels="BGR") 
         st.latex(rf"a = {curr_row['a']:.3f} \,\, \mathrm{{m/s^2}}") 
     with r2c2: 
-        st.image(create_graph_image(df.iloc[:time_idx+1], "x", "F", "x", "F", "m", "N", 'purple', 450, x_m, f_mi, f_ma, shade_range=(t1, t2), markers=marker_times), channels="BGR") 
+        st.image(create_graph_image(df.iloc[:time_idx+1], "x", "F", "x", "F", "m", "N", 'purple', 450, x_m, f_mi, f_ma, shade_range=shade_rng, markers=marker_times), channels="BGR") 
         st.latex(rf"F = {curr_row['F']:.3f} \,\, \mathrm{{N}}") 
 
     st.divider() 
@@ -235,35 +237,26 @@ if uploaded_file:
 
         fourcc = cv2.VideoWriter_fourcc(*'mp4v') 
         out = cv2.VideoWriter(final_path, fourcc, meta["raw_fps"], (meta["w"], meta["h"] + header_h)) 
-         
         cap = cv2.VideoCapture(meta["path"]) 
         p_bar = st.progress(0.0) 
-        status_text = st.empty() 
          
-        scale = meta.get("scale", 1.0) 
-
         for i in range(len(df)): 
             ret, frame_raw = cap.read() 
             if not ret: break 
-             
-            frame = cv2.resize(frame_raw, (meta["w"], meta["h"])) if scale < 1.0 else frame_raw 
+            frame = cv2.resize(frame_raw, (meta["w"], meta["h"])) if meta.get("scale", 1.0) < 1.0 else frame_raw 
             canvas = np.zeros((meta["h"] + header_h, meta["w"], 3), dtype=np.uint8) 
             curr = df.iloc[i] 
             df_s = df.iloc[:i+1] 
              
             for idx, g in enumerate(graph_configs): 
-                g_img = create_graph_image(df_s, g["xc"], g["yc"], g["xl"], g["yl"], g["xu"], g["yu"], g["col"], v_size, g["xm"], g["ymn"], g["ymx"], shade_range=None, markers=None) 
+                # 動画内でも色付けを反映
+                g_img = create_graph_image(df_s, g["xc"], g["yc"], g["xl"], g["yl"], g["xu"], g["yu"], g["col"], v_size, g["xm"], g["ymn"], g["ymx"], shade_range=shade_rng, markers=marker_times) 
                 canvas[0:v_size, idx*v_size:(idx+1)*v_size] = g_img 
-                disp_unit = g.get("yu_cv", g["yu"])   
-                val_text = f"{g['yl']} = {curr[g['yc']]:>+7.3f} {disp_unit}" 
-                (tw, th), _ = cv2.getTextSize(val_text, font, 0.5, 1) 
-                cv2.putText(canvas, val_text, (idx*v_size + (v_size-tw)//2, v_size + 50), font, 0.5, (255,255,255), 1, cv2.LINE_AA) 
+                val_text = f"{g['yl']} = {curr[g['yc']]:>+7.3f}" 
+                cv2.putText(canvas, val_text, (idx*v_size + 10, v_size + 50), font, 0.5, (255,255,255), 1) 
              
-            t_text = f"t = {curr['t']:.2f} s" 
-            cv2.putText(frame, t_text, (20, 40), font, 1.0, (255,255,255), 2, cv2.LINE_AA) 
-             
+            cv2.putText(frame, f"t = {curr['t']:.2f} s", (20, 40), font, 1.0, (255,255,255), 2) 
             if not np.isnan(curr['gx']): 
-                # 解析円（黄色い輪）を動的な半径で描画
                 cv2.circle(frame, (int(curr['gx']), int(curr['gy'])), int(curr['roi']), (255,255,0), 1) 
                 cv2.circle(frame, (int(curr['gx']), int(curr['gy'])), 5, (0,255,0), -1) 
                 if not np.isnan(curr['bx']): 
@@ -271,14 +264,8 @@ if uploaded_file:
              
             canvas[header_h:, :] = frame 
             out.write(canvas) 
-            if i % 10 == 0: 
-                p_bar.progress(i / len(df)) 
-                status_text.text(f"生成中: {i}/{len(df)} フレーム") 
+            if i % 20 == 0: p_bar.progress(i / len(df)) 
 
-        cap.release() 
-        out.release() 
-        p_bar.empty() 
-        status_text.success("✅ 動画生成が完了しました！") 
-         
+        cap.release(); out.release() 
         with open(final_path, "rb") as f: 
             st.download_button("💾 完成した動画をダウンロード", f, file_name=f"analysis_v{VERSION}.mp4")
