@@ -12,7 +12,7 @@ import os
 plt.switch_backend('Agg') 
 plt.rcParams['mathtext.fontset'] = 'cm' 
 RADIUS_M = 0.016 
-VERSION = "2.7.5_MotionBlur_Optimized" 
+VERSION = "2.7.6_Fixed_Kernel" 
 MAX_DURATION = 10.0 
 MAX_ANALYSIS_WIDTH = 1280 
 
@@ -65,7 +65,7 @@ st.title(f"🚀 CartGrapher Studio ver {VERSION}")
 
 st.sidebar.header("解析設定") 
 mass_input = st.sidebar.number_input("台車の質量 $m$ [kg]", value=0.100, min_value=0.001, format="%.3f", step=0.001) 
-search_range = 150 # 緑（中心）からピンクを探す半径 [px]
+search_range = 150 
 
 uploaded_file = st.file_uploader("動画をアップロード (10秒以内)", type=["mp4", "mov"]) 
 
@@ -92,14 +92,11 @@ if uploaded_file:
 
             data_log = []; total_angle, prev_angle = 0.0, None; last_valid_gx, last_valid_gy = np.nan, np.nan 
             
-            # --- カラー設定 ---
-            # 緑 (中心軸): 安定しているため標準的な範囲
             L_G = (np.array([40, 50, 50]), np.array([90, 255, 255]))
-            # ピンク (回転点): ブレ対策として彩度(S)と明度(V)の下限を大幅に緩和
             L_P_loose = (np.array([140, 25, 60]), np.array([180, 255, 255]))
 
-            # モルフォロジー変換用カーネル（穴埋め用）
-            kernel = np.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+            # --- 修正箇所：cv2.getStructuringElement に変更 ---
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
 
             f_idx = 0 
             while True: 
@@ -109,7 +106,6 @@ if uploaded_file:
                 frame = cv2.resize(frame_raw, (w, h)) if scale_factor < 1.0 else frame_raw 
                 hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV) 
 
-                # 1. 緑（中心軸）の検出
                 mask_g = cv2.inRange(hsv, L_G[0], L_G[1])
                 con_g, _ = cv2.findContours(mask_g, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE) 
                 
@@ -120,35 +116,27 @@ if uploaded_file:
                     if M["m00"] > 40: 
                         gx, gy = M["m10"]/M["m00"], M["m01"]/M["m00"] 
                 
-                # 中心座標の補間（急激な飛びを抑制）
                 if not np.isnan(last_valid_gx) and not np.isnan(gx): 
                     if np.sqrt((gx - last_valid_gx)**2 + (gy - last_valid_gy)**2) > 50: 
                         gx, gy = last_valid_gx, last_valid_gy 
                 if not np.isnan(gx): last_valid_gx, last_valid_gy = gx, gy
 
-                # 2. ピンク（回転点）の検出：重心(Moments)ベース
                 bx, by = np.nan, np.nan 
                 if not np.isnan(gx): 
-                    # 探索範囲の限定（ROIマスク）
                     roi_mask = np.zeros((h, w), dtype=np.uint8)
                     cv2.circle(roi_mask, (int(gx), int(gy)), search_range, 255, -1)
                     
-                    # マスク適用
                     mask_p = cv2.inRange(hsv, L_P_loose[0], L_P_loose[1])
                     mask_p_roi = cv2.bitwise_and(mask_p, roi_mask)
-                    
-                    # ブレで千切れた領域を繋ぐ（クロージング処理）
                     mask_p_roi = cv2.morphologyEx(mask_p_roi, cv2.MORPH_CLOSE, kernel)
                     
                     con_p, _ = cv2.findContours(mask_p_roi, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE) 
                     if con_p: 
-                        # 最も面積が大きい塊の重心を取得
                         cp = max(con_p, key=cv2.contourArea)
                         Mp = cv2.moments(cp) 
-                        if Mp["m00"] > 20: # ブレて薄くなっても20px以上あれば重心をとる
+                        if Mp["m00"] > 20: 
                             bx, by = Mp["m10"]/Mp["m00"], Mp["m01"]/Mp["m00"] 
 
-                # 3. 回転角の積算
                 if not np.isnan(gx) and not np.isnan(bx): 
                     curr_a = np.arctan2(by - gy, bx - gx) 
                     if prev_angle is not None: 
@@ -164,7 +152,6 @@ if uploaded_file:
             cap.release() 
             df = pd.DataFrame(data_log).interpolate().ffill().bfill() 
             if len(df) > 31: 
-                # Savitzky-Golayフィルタで滑らかに（微分ノイズ対策）
                 df["x"] = savgol_filter(df["x"], 15, 2)
                 df["v"] = savgol_filter(df["x"].diff().fillna(0)*fps, 31, 2) 
                 df["a"] = savgol_filter(df["v"].diff().fillna(0)*fps, 31, 2)
@@ -174,7 +161,6 @@ if uploaded_file:
             st.session_state.video_meta = {"fps": fps, "raw_fps": raw_fps, "w": w, "h": h, "path": tfile_temp.name, "scale": scale_factor} 
             st.session_state.file_id = uploaded_file.name 
 
-    # --- 以下、UI・グラフ表示・動画生成ロジック（変更なし） ---
     df = st.session_state.df 
     st.sidebar.markdown("---") 
     t_max_limit = float(df["t"].max()) 
@@ -268,10 +254,10 @@ if uploaded_file:
             cv2.putText(frame, t_text, (20, 40), font, 1.0, (255,255,255), 2, cv2.LINE_AA) 
              
             if not np.isnan(curr['gx']): 
-                cv2.circle(frame, (int(curr['gx']), int(curr['gy'])), search_range, (255,255,0), 1) # 探索円
-                cv2.circle(frame, (int(curr['gx']), int(curr['gy'])), 5, (0,255,0), -1) # 中心点
+                cv2.circle(frame, (int(curr['gx']), int(curr['gy'])), search_range, (255,255,0), 1) 
+                cv2.circle(frame, (int(curr['gx']), int(curr['gy'])), 5, (0,255,0), -1) 
                 if not np.isnan(curr['bx']): 
-                    cv2.circle(frame, (int(curr['bx']), int(curr['by'])), 5, (255,0,255), -1) # 回転点
+                    cv2.circle(frame, (int(curr['bx']), int(curr['by'])), 5, (255,0,255), -1) 
              
             canvas[header_h:, :] = frame 
             out.write(canvas) 
