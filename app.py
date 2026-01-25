@@ -12,7 +12,7 @@ import os
 plt.switch_backend('Agg') 
 plt.rcParams['mathtext.fontset'] = 'cm' 
 RADIUS_M = 0.016 
-VERSION = "3.0.0_Vector_Method" 
+VERSION = "2.7.7_Dynamic_ROI" 
 MAX_DURATION = 10.0 
 MAX_ANALYSIS_WIDTH = 1280 
 
@@ -37,7 +37,7 @@ def create_graph_image(df_sub, x_col, y_col, x_label, y_label, x_unit, y_unit, c
                 for t_val in markers: 
                     m_row = df_sub.iloc[(df_sub['t']-t_val).abs().argsort()[:1]] 
                     if not m_row.empty: 
-                        ax.scatter(m_row[x_col], m_row[y_row if 'y_row' in locals() else y_col], color='orange', s=50, marker='o', edgecolors='black', zorder=10) 
+                        ax.scatter(m_row[x_col], m_row[y_col], color='orange', s=50, marker='o', edgecolors='black', zorder=10) 
 
             if shade_range is not None and y_col == 'F': 
                 t_s, t_e = shade_range 
@@ -65,7 +65,7 @@ st.title(f"🚀 CartGrapher Studio ver {VERSION}")
 
 st.sidebar.header("解析設定") 
 mass_input = st.sidebar.number_input("台車の質量 $m$ [kg]", value=0.100, min_value=0.001, format="%.3f", step=0.001) 
-search_range = 150 
+# search_range = 150  # 固定値から動的計算へ変更
 
 uploaded_file = st.file_uploader("動画をアップロード (10秒以内)", type=["mp4", "mov"]) 
 
@@ -75,7 +75,7 @@ if uploaded_file:
     tfile_temp.close() 
 
     if "df" not in st.session_state or st.session_state.get("file_id") != uploaded_file.name: 
-        with st.spinner("平均角度ベクトル解析を実行中..."): 
+        with st.spinner("動的ROIエンジンで解析中..."): 
             cap = cv2.VideoCapture(tfile_temp.name) 
             raw_fps = cap.get(cv2.CAP_PROP_FPS) or 30 
             fps = raw_fps * 4  
@@ -90,9 +90,9 @@ if uploaded_file:
             w = int(raw_w * scale_factor) 
             h = int(raw_h * scale_factor) 
 
-            data_log = []; total_angle, prev_angle = 0.0, None 
-            last_valid_gx, last_valid_gy = np.nan, np.nan 
-
+            data_log = []; total_angle, prev_angle = 0.0, None; last_valid_gx, last_valid_gy = np.nan, np.nan 
+            dynamic_roi_list = [] # 描画用に保存
+            
             L_G = (np.array([40, 50, 50]), np.array([90, 255, 255]))
             L_P_loose = (np.array([140, 25, 60]), np.array([180, 255, 255]))
             kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
@@ -105,15 +105,21 @@ if uploaded_file:
                 frame = cv2.resize(frame_raw, (w, h)) if scale_factor < 1.0 else frame_raw 
                 hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV) 
 
-                # 緑（中心）の検出
                 mask_g = cv2.inRange(hsv, L_G[0], L_G[1])
                 con_g, _ = cv2.findContours(mask_g, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE) 
+                
                 gx, gy = np.nan, np.nan 
+                current_search_range = 150 # デフォルト
+                
                 if con_g: 
                     c = max(con_g, key=cv2.contourArea)
+                    area = cv2.contourArea(c)
                     M = cv2.moments(c) 
                     if M["m00"] > 40: 
                         gx, gy = M["m10"]/M["m00"], M["m01"]/M["m00"] 
+                        # 緑の面積から半径を逆算 (Area = pi * r^2) し、その5.5倍を探索窓にする
+                        green_r = np.sqrt(area / np.pi)
+                        current_search_range = int(green_r * 5.5)
                 
                 if not np.isnan(last_valid_gx) and not np.isnan(gx): 
                     if np.sqrt((gx - last_valid_gx)**2 + (gy - last_valid_gy)**2) > 50: 
@@ -121,35 +127,23 @@ if uploaded_file:
                 if not np.isnan(gx): last_valid_gx, last_valid_gy = gx, gy
 
                 bx, by = np.nan, np.nan 
-                curr_a = np.nan
                 if not np.isnan(gx): 
-                    # 探索用マスク作成
                     roi_mask = np.zeros((h, w), dtype=np.uint8)
-                    cv2.circle(roi_mask, (int(gx), int(gy)), search_range, 255, -1)
+                    cv2.circle(roi_mask, (int(gx), int(gy)), current_search_range, 255, -1)
                     
-                    # ピンク色ピクセルの抽出
                     mask_p = cv2.inRange(hsv, L_P_loose[0], L_P_loose[1])
                     mask_p_roi = cv2.bitwise_and(mask_p, roi_mask)
                     mask_p_roi = cv2.morphologyEx(mask_p_roi, cv2.MORPH_CLOSE, kernel)
                     
-                    # ピクセル座標のリストを取得
-                    p_coords = np.column_stack(np.where(mask_p_roi > 0)) # [[y, x], ...]
-                    
-                    if len(p_coords) > 5: # 一定数以上のピクセルがあれば平均角度を計算
-                        # 各ピクセルと緑中心との相対座標(dx, dy)
-                        dys = p_coords[:, 0] - gy
-                        dxs = p_coords[:, 1] - gx
-                        
-                        # ベクトル合成（平均角度の算出）
-                        # 角度を直接平均せず、sin/cos成分を合計してarctan2で戻すことで、不連続点（180/-180度）を回避
-                        avg_cos = np.mean(dxs / np.sqrt(dxs**2 + dys**2))
-                        avg_sin = np.mean(dys / np.sqrt(dxs**2 + dys**2))
-                        curr_a = np.arctan2(avg_sin, avg_cos)
-                        
-                        # 表示用ダミー座標（半径50の円周上に描画）
-                        bx, by = gx + 50 * np.cos(curr_a), gy + 50 * np.sin(curr_a)
+                    con_p, _ = cv2.findContours(mask_p_roi, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE) 
+                    if con_p: 
+                        cp = max(con_p, key=cv2.contourArea)
+                        Mp = cv2.moments(cp) 
+                        if Mp["m00"] > 20: 
+                            bx, by = Mp["m10"]/Mp["m00"], Mp["m01"]/Mp["m00"] 
 
-                if not np.isnan(curr_a): 
+                if not np.isnan(gx) and not np.isnan(bx): 
+                    curr_a = np.arctan2(by - gy, bx - gx) 
                     if prev_angle is not None: 
                         diff = curr_a - prev_angle 
                         if diff > np.pi: diff -= 2*np.pi 
@@ -157,7 +151,11 @@ if uploaded_file:
                         total_angle += diff 
                     prev_angle = curr_a 
                  
-                data_log.append({"t": f_idx/fps, "x": total_angle*RADIUS_M, "gx": gx, "gy": gy, "bx": bx, "by": by}) 
+                data_log.append({
+                    "t": f_idx/fps, "x": total_angle*RADIUS_M, 
+                    "gx": gx, "gy": gy, "bx": bx, "by": by, 
+                    "roi": current_search_range
+                }) 
                 f_idx += 1 
 
             cap.release() 
@@ -172,7 +170,6 @@ if uploaded_file:
             st.session_state.video_meta = {"fps": fps, "raw_fps": raw_fps, "w": w, "h": h, "path": tfile_temp.name, "scale": scale_factor} 
             st.session_state.file_id = uploaded_file.name 
 
-    # --- UI/表示ロジック (v2.7.6構成を維持) ---
     df = st.session_state.df 
     st.sidebar.markdown("---") 
     t_max_limit = float(df["t"].max()) 
@@ -194,7 +191,8 @@ if uploaded_file:
     v_mi, v_ma = float(df["v"].min()), float(df["v"].max()) 
     a_mi, a_ma = float(df["a"].min()), float(df["a"].max()) 
     f_mi, f_ma = float(df["F"].min()), float(df["F"].max()) 
-    marker_times = [t1, t2]
+
+    marker_times = [t1, t2] 
 
     r1c1, r1c2 = st.columns(2) 
     with r1c1: 
@@ -215,7 +213,10 @@ if uploaded_file:
     st.divider() 
     df_w = df[(df["t"] >= t1) & (df["t"] <= t2)] 
     if len(df_w) > 1: 
-        w_val = np.trapz(df_w["F"], df_w["x"]) if not hasattr(np, 'trapezoid') else np.trapezoid(df_w["F"], df_w["x"])
+        if hasattr(np, 'trapezoid'): 
+            w_val = np.trapezoid(df_w["F"], df_w["x"]) 
+        else: 
+            w_val = np.trapz(df_w["F"], df_w["x"]) 
         st.latex(rf"W = {format_sci_latex(w_val)} \,\, \mathrm{{J}}") 
 
     if st.button(f"🎥 解析動画を生成して保存"): 
@@ -224,7 +225,7 @@ if uploaded_file:
         v_size = meta["w"] // 4 
         header_h = v_size + 100 
         font = cv2.FONT_HERSHEY_SIMPLEX 
-        
+         
         graph_configs = [ 
             {"xc": "t", "yc": "x", "xl": "t", "yl": "x", "xu": "s", "yu": "m", "col": "blue", "ymn": 0.0, "ymx": x_m, "xm": t_m}, 
             {"xc": "t", "yc": "v", "xl": "t", "yl": "v", "xu": "s", "yu": "m/s", "col": "red", "ymn": v_mi, "ymx": v_ma, "xm": t_m}, 
@@ -234,33 +235,50 @@ if uploaded_file:
 
         fourcc = cv2.VideoWriter_fourcc(*'mp4v') 
         out = cv2.VideoWriter(final_path, fourcc, meta["raw_fps"], (meta["w"], meta["h"] + header_h)) 
+         
         cap = cv2.VideoCapture(meta["path"]) 
         p_bar = st.progress(0.0) 
-        
+        status_text = st.empty() 
+         
+        scale = meta.get("scale", 1.0) 
+
         for i in range(len(df)): 
             ret, frame_raw = cap.read() 
             if not ret: break 
-            frame = cv2.resize(frame_raw, (meta["w"], meta["h"])) if meta.get("scale", 1.0) < 1.0 else frame_raw 
+             
+            frame = cv2.resize(frame_raw, (meta["w"], meta["h"])) if scale < 1.0 else frame_raw 
             canvas = np.zeros((meta["h"] + header_h, meta["w"], 3), dtype=np.uint8) 
             curr = df.iloc[i] 
             df_s = df.iloc[:i+1] 
-            
+             
             for idx, g in enumerate(graph_configs): 
-                g_img = create_graph_image(df_s, g["xc"], g["yc"], g["xl"], g["yl"], g["xu"], g["yu"], g["col"], v_size, g["xm"], g["ymn"], g["ymx"]) 
+                g_img = create_graph_image(df_s, g["xc"], g["yc"], g["xl"], g["yl"], g["xu"], g["yu"], g["col"], v_size, g["xm"], g["ymn"], g["ymx"], shade_range=None, markers=None) 
                 canvas[0:v_size, idx*v_size:(idx+1)*v_size] = g_img 
-                val_text = f"{g['yl']} = {curr[g['yc']]:>+7.3f}" 
-                cv2.putText(canvas, val_text, (idx*v_size + 10, v_size + 50), font, 0.4, (255,255,255), 1) 
-
+                disp_unit = g.get("yu_cv", g["yu"])   
+                val_text = f"{g['yl']} = {curr[g['yc']]:>+7.3f} {disp_unit}" 
+                (tw, th), _ = cv2.getTextSize(val_text, font, 0.5, 1) 
+                cv2.putText(canvas, val_text, (idx*v_size + (v_size-tw)//2, v_size + 50), font, 0.5, (255,255,255), 1, cv2.LINE_AA) 
+             
+            t_text = f"t = {curr['t']:.2f} s" 
+            cv2.putText(frame, t_text, (20, 40), font, 1.0, (255,255,255), 2, cv2.LINE_AA) 
+             
             if not np.isnan(curr['gx']): 
+                # 解析円（黄色い輪）を動的な半径で描画
+                cv2.circle(frame, (int(curr['gx']), int(curr['gy'])), int(curr['roi']), (255,255,0), 1) 
                 cv2.circle(frame, (int(curr['gx']), int(curr['gy'])), 5, (0,255,0), -1) 
                 if not np.isnan(curr['bx']): 
-                    cv2.line(frame, (int(curr['gx']), int(curr['gy'])), (int(curr['bx']), int(curr['by'])), (255,0,255), 2)
                     cv2.circle(frame, (int(curr['bx']), int(curr['by'])), 5, (255,0,255), -1) 
              
             canvas[header_h:, :] = frame 
             out.write(canvas) 
-            if i % 10 == 0: p_bar.progress(i / len(df)) 
+            if i % 10 == 0: 
+                p_bar.progress(i / len(df)) 
+                status_text.text(f"生成中: {i}/{len(df)} フレーム") 
 
-        cap.release(); out.release() 
+        cap.release() 
+        out.release() 
+        p_bar.empty() 
+        status_text.success("✅ 動画生成が完了しました！") 
+         
         with open(final_path, "rb") as f: 
             st.download_button("💾 完成した動画をダウンロード", f, file_name=f"analysis_v{VERSION}.mp4")
