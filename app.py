@@ -12,7 +12,7 @@ import os
 plt.switch_backend('Agg') 
 plt.rcParams['mathtext.fontset'] = 'cm' 
 RADIUS_M = 0.016 
-VERSION = "2.9.4_Final_Stable" 
+VERSION = "2.9.5_Jump_Filtered" 
 MAX_DURATION = 10.0 
 MAX_ANALYSIS_WIDTH = 1280 
 
@@ -75,12 +75,11 @@ if uploaded_file:
     tfile_temp.close() 
 
     if "df" not in st.session_state or st.session_state.get("file_id") != uploaded_file.name: 
-        with st.spinner("エラー修正版・最適化トラッキング実行中..."): 
+        with st.spinner("ジャンプ抑制フィルタを適用して解析中..."): 
             cap = cv2.VideoCapture(tfile_temp.name) 
             raw_fps = cap.get(cv2.CAP_PROP_FPS) or 30 
             fps = raw_fps * 4  
              
-            # --- ここを修正: FRAME_WIDTH / FRAME_HEIGHT ---
             raw_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) 
             raw_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) 
              
@@ -93,10 +92,7 @@ if uploaded_file:
 
             data_log = []; total_angle, prev_angle = 0.0, None 
             last_valid_gx, last_valid_gy = np.nan, np.nan 
-            
-            # --- パラメータ ---
-            ema_bx, ema_by = np.nan, np.nan
-            # ALPHA = 0.7 # 基本のスムージング強度
+            last_valid_bx, last_valid_by = np.nan, np.nan # ピンクの過去位置保存用
 
             L_G = (np.array([40, 50, 50]), np.array([90, 255, 255]))
             L_P_loose = (np.array([140, 25, 60]), np.array([180, 255, 255]))
@@ -108,16 +104,16 @@ if uploaded_file:
                 if not ret: break 
                  
                 frame = cv2.resize(frame_raw, (w, h)) if scale_factor < 1.0 else frame_raw 
-                blurred = cv2.GaussianBlur(frame, (5, 5), 0)
-                hsv = cv2.cvtColor(blurred, cv2.COLOR_BGR2HSV) 
+                hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV) 
 
+                # 1. 緑（中心点）の検出とジャンプ抑制
                 mask_g = cv2.inRange(hsv, L_G[0], L_G[1])
                 con_g, _ = cv2.findContours(mask_g, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE) 
                 gx, gy = np.nan, np.nan 
                 if con_g: 
                     c = max(con_g, key=cv2.contourArea)
                     M = cv2.moments(c) 
-                    if M["m00"] > 30: 
+                    if M["m00"] > 40: 
                         gx, gy = M["m10"]/M["m00"], M["m01"]/M["m00"] 
                 
                 if not np.isnan(last_valid_gx) and not np.isnan(gx): 
@@ -125,6 +121,7 @@ if uploaded_file:
                         gx, gy = last_valid_gx, last_valid_gy 
                 if not np.isnan(gx): last_valid_gx, last_valid_gy = gx, gy
 
+                # 2. ピンク（回転点）の検出とジャンプ抑制
                 bx, by = np.nan, np.nan 
                 if not np.isnan(gx): 
                     roi_mask = np.zeros((h, w), dtype=np.uint8)
@@ -132,30 +129,29 @@ if uploaded_file:
                     
                     mask_p = cv2.inRange(hsv, L_P_loose[0], L_P_loose[1])
                     mask_p_roi = cv2.bitwise_and(mask_p, roi_mask)
-                    mask_p_roi = cv2.morphologyEx(mask_p_roi, cv2.MORPH_OPEN, kernel)
                     mask_p_roi = cv2.morphologyEx(mask_p_roi, cv2.MORPH_CLOSE, kernel)
                     
                     con_p, _ = cv2.findContours(mask_p_roi, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE) 
                     if con_p: 
                         cp = max(con_p, key=cv2.contourArea)
                         Mp = cv2.moments(cp) 
-                        if Mp["m00"] > 25: 
-                            raw_bx = Mp["m10"]/Mp["m00"]
-                            raw_by = Mp["m01"]/Mp["m00"]
+                        if Mp["m00"] > 20: 
+                            raw_bx, raw_by = Mp["m10"]/Mp["m00"], Mp["m01"]/Mp["m00"] 
                             
-                            if np.isnan(ema_bx):
-                                ema_bx, ema_by = raw_bx, raw_by
+                            # --- ジャンプ対策の追加 ---
+                            if not np.isnan(last_valid_bx):
+                                dist = np.sqrt((raw_bx - last_valid_bx)**2 + (raw_by - last_valid_by)**2)
+                                if dist > 60: # 60px以上の急激なジャンプは無視（NaNにして補間に任せる）
+                                    bx, by = np.nan, np.nan
+                                else:
+                                    bx, by = raw_bx, raw_by
                             else:
-                                # A. 変化量（速度）に応じてALPHAを可変にする
-                                dist = np.sqrt((raw_bx - ema_bx)**2 + (raw_by - ema_by)**2)
-                                # 動きが速いときは 0.9 (ラグ小), 遅いときは 0.5 (チラつき抑止) に可変
-                                adaptive_alpha = 0.5 + min(0.4, dist / 10.0) 
+                                bx, by = raw_bx, raw_by
                                 
-                                ema_bx = adaptive_alpha * raw_bx + (1 - adaptive_alpha) * ema_bx
-                                ema_by = adaptive_alpha * raw_by + (1 - adaptive_alpha) * ema_by
-                            
-                            bx, by = ema_bx, ema_by
+                            if not np.isnan(bx):
+                                last_valid_bx, last_valid_by = bx, by
 
+                # 角度と累積回転の計算
                 if not np.isnan(gx) and not np.isnan(bx): 
                     curr_a = np.arctan2(by - gy, bx - gx) 
                     if prev_angle is not None: 
@@ -169,7 +165,8 @@ if uploaded_file:
                 f_idx += 1 
 
             cap.release() 
-            df = pd.DataFrame(data_log).interpolate().ffill().bfill() 
+            # 異常値（NaN）を前後の平均値（線形補間）で埋める
+            df = pd.DataFrame(data_log).interpolate(method='linear').ffill().bfill() 
             if len(df) > 31: 
                 df["x"] = savgol_filter(df["x"], 15, 2)
                 df["v"] = savgol_filter(df["x"].diff().fillna(0)*fps, 31, 2) 
@@ -180,19 +177,12 @@ if uploaded_file:
             st.session_state.video_meta = {"fps": fps, "raw_fps": raw_fps, "w": w, "h": h, "path": tfile_temp.name, "scale": scale_factor} 
             st.session_state.file_id = uploaded_file.name 
 
-    # --- UI &表示 (前回同様) ---
+    # --- UI/動画生成部分は v2.7.6 を維持 ---
     df = st.session_state.df 
     st.sidebar.markdown("---") 
     t_max_limit = float(df["t"].max()) 
     t1 = st.sidebar.number_input(r"開始時刻 $t_1$ [s]", 0.0, t_max_limit, 0.0, 0.01) 
-    row1 = df.iloc[(df['t']-t1).abs().argsort()[:1]] 
-    st.sidebar.markdown(rf"$x_1 = {row1['x'].values[0]:.3f} \,\, \mathrm{{m}}$") 
-    st.sidebar.markdown(rf"$v_1 = {row1['v'].values[0]:.3f} \,\, \mathrm{{m/s}}$") 
-    st.sidebar.markdown("---") 
     t2 = st.sidebar.number_input(r"終了時刻 $t_2$ [s]", 0.0, t_max_limit, t_max_limit, 0.01) 
-    row2 = df.iloc[(df['t']-t2).abs().argsort()[:1]] 
-    st.sidebar.markdown(rf"$x_2 = {row2['x'].values[0]:.3f} \,\, \mathrm{{m}}$") 
-    st.sidebar.markdown(rf"$v_2 = {row2['v'].values[0]:.3f} \,\, \mathrm{{m/s}}$") 
 
     time_list = [round(t, 4) for t in df["t"].tolist()] 
     selected_t = st.select_slider("時刻をスキャン [s]", options=time_list, value=time_list[0]) 
@@ -206,18 +196,14 @@ if uploaded_file:
     r1c1, r1c2 = st.columns(2) 
     with r1c1: 
         st.image(create_graph_image(df.iloc[:time_idx+1], "t", "x", "t", "x", "s", "m", 'blue', 450, t_m, 0.0, x_m, markers=[t1, t2]), channels="BGR") 
-        st.latex(rf"x = {curr_row['x']:.3f} \,\, \mathrm{{m}}") 
     with r1c2: 
         st.image(create_graph_image(df.iloc[:time_idx+1], "t", "v", "t", "v", "s", "m/s", 'red', 450, t_m, v_mi, v_ma, markers=[t1, t2]), channels="BGR") 
-        st.latex(rf"v = {curr_row['v']:.3f} \,\, \mathrm{{m/s}}") 
 
     r2c1, r2c2 = st.columns(2) 
     with r2c1: 
         st.image(create_graph_image(df.iloc[:time_idx+1], "t", "a", "t", "a", "s", "m/s²", 'green', 450, t_m, a_mi, a_ma, markers=[t1, t2]), channels="BGR") 
-        st.latex(rf"a = {curr_row['a']:.3f} \,\, \mathrm{{m/s^2}}") 
     with r2c2: 
         st.image(create_graph_image(df.iloc[:time_idx+1], "x", "F", "x", "F", "m", "N", 'purple', 450, x_m, f_mi, f_ma, shade_range=(t1, t2), markers=[t1, t2]), channels="BGR") 
-        st.latex(rf"F = {curr_row['F']:.3f} \,\, \mathrm{{N}}") 
 
     if st.button(f"🎥 解析動画を生成して保存"): 
         meta = st.session_state.video_meta 
@@ -225,11 +211,8 @@ if uploaded_file:
         v_size = meta["w"] // 4 
         header_h = v_size + 100 
         font = cv2.FONT_HERSHEY_SIMPLEX 
-        
-        fourcc = cv2.VideoWriter_fourcc(*'mp4v') 
-        out = cv2.VideoWriter(final_path, fourcc, meta["raw_fps"], (meta["w"], meta["h"] + header_h)) 
+        out = cv2.VideoWriter(final_path, cv2.VideoWriter_fourcc(*'mp4v'), meta["raw_fps"], (meta["w"], meta["h"] + header_h)) 
         cap = cv2.VideoCapture(meta["path"]) 
-        p_bar = st.progress(0.0) 
         
         for i in range(len(df)): 
             ret, frame_raw = cap.read() 
@@ -238,6 +221,7 @@ if uploaded_file:
             canvas = np.zeros((meta["h"] + header_h, meta["w"], 3), dtype=np.uint8) 
             curr = df.iloc[i] 
             
+            # 動画内に緑とピンクの点を描画
             if not np.isnan(curr['gx']): 
                 cv2.circle(frame, (int(curr['gx']), int(curr['gy'])), search_range, (255,255,0), 1)
                 cv2.circle(frame, (int(curr['gx']), int(curr['gy'])), 5, (0,255,0), -1) 
@@ -246,8 +230,6 @@ if uploaded_file:
              
             canvas[header_h:, :] = frame 
             out.write(canvas) 
-            if i % 20 == 0: p_bar.progress(i / len(df)) 
-
         cap.release(); out.release() 
         with open(final_path, "rb") as f: 
-            st.download_button("💾 解析動画をダウンロード", f, file_name=f"analysis_v{VERSION}.mp4")
+            st.download_button("💾 動画をダウンロード", f, file_name=f"analysis_v{VERSION}.mp4")
