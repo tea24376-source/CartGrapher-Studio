@@ -12,7 +12,7 @@ import os
 plt.switch_backend('Agg') 
 plt.rcParams['mathtext.fontset'] = 'cm' 
 RADIUS_M = 0.016 
-VERSION = "2.7.6_Fixed_Kernel" 
+VERSION = "2.8.0_Smooth_Tracking" 
 MAX_DURATION = 10.0 
 MAX_ANALYSIS_WIDTH = 1280 
 
@@ -75,7 +75,7 @@ if uploaded_file:
     tfile_temp.close() 
 
     if "df" not in st.session_state or st.session_state.get("file_id") != uploaded_file.name: 
-        with st.spinner("高速回転・ブレ対策エンジンで解析中..."): 
+        with st.spinner("低速チラつき抑制エンジンで解析中..."): 
             cap = cv2.VideoCapture(tfile_temp.name) 
             raw_fps = cap.get(cv2.CAP_PROP_FPS) or 30 
             fps = raw_fps * 4  
@@ -92,10 +92,13 @@ if uploaded_file:
 
             data_log = []; total_angle, prev_angle = 0.0, None; last_valid_gx, last_valid_gy = np.nan, np.nan 
             
+            # --- 座標スムージング用のバッファ ---
+            bx_buffer, by_buffer = [], []
+            SMOOTH_WINDOW = 3 # 3フレームの平均をとる
+
             L_G = (np.array([40, 50, 50]), np.array([90, 255, 255]))
             L_P_loose = (np.array([140, 25, 60]), np.array([180, 255, 255]))
 
-            # --- 修正箇所：cv2.getStructuringElement に変更 ---
             kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
 
             f_idx = 0 
@@ -104,8 +107,12 @@ if uploaded_file:
                 if not ret: break 
                  
                 frame = cv2.resize(frame_raw, (w, h)) if scale_factor < 1.0 else frame_raw 
-                hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV) 
+                
+                # --- 前処理：ガウスぼかしでピクセルノイズを平滑化 ---
+                blurred_frame = cv2.GaussianBlur(frame, (5, 5), 0)
+                hsv = cv2.cvtColor(blurred_frame, cv2.COLOR_BGR2HSV) 
 
+                # 1. 中心の緑を検出
                 mask_g = cv2.inRange(hsv, L_G[0], L_G[1])
                 con_g, _ = cv2.findContours(mask_g, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE) 
                 
@@ -121,6 +128,7 @@ if uploaded_file:
                         gx, gy = last_valid_gx, last_valid_gy 
                 if not np.isnan(gx): last_valid_gx, last_valid_gy = gx, gy
 
+                # 2. ピンクの重心を検出し、移動平均を適用
                 bx, by = np.nan, np.nan 
                 if not np.isnan(gx): 
                     roi_mask = np.zeros((h, w), dtype=np.uint8)
@@ -134,8 +142,23 @@ if uploaded_file:
                     if con_p: 
                         cp = max(con_p, key=cv2.contourArea)
                         Mp = cv2.moments(cp) 
-                        if Mp["m00"] > 20: 
-                            bx, by = Mp["m10"]/Mp["m00"], Mp["m01"]/Mp["m00"] 
+                        if Mp["m00"] > 35: # チラつき防止のため閾値をわずかにアップ
+                            raw_bx = Mp["m10"]/Mp["m00"]
+                            raw_by = Mp["m01"]/Mp["m00"]
+                            
+                            # バッファに保存
+                            bx_buffer.append(raw_bx)
+                            by_buffer.append(raw_by)
+                            if len(bx_buffer) > SMOOTH_WINDOW:
+                                bx_buffer.pop(0)
+                                by_buffer.pop(0)
+                            
+                            # 平均値を現在の座標として採用
+                            bx = sum(bx_buffer) / len(bx_buffer)
+                            by = sum(by_buffer) / len(by_buffer)
+                        else:
+                            bx_buffer.clear()
+                            by_buffer.clear()
 
                 if not np.isnan(gx) and not np.isnan(bx): 
                     curr_a = np.arctan2(by - gy, bx - gx) 
@@ -161,6 +184,7 @@ if uploaded_file:
             st.session_state.video_meta = {"fps": fps, "raw_fps": raw_fps, "w": w, "h": h, "path": tfile_temp.name, "scale": scale_factor} 
             st.session_state.file_id = uploaded_file.name 
 
+    # --- UI & 表示ロジック ---
     df = st.session_state.df 
     st.sidebar.markdown("---") 
     t_max_limit = float(df["t"].max()) 
