@@ -12,7 +12,7 @@ import os
 plt.switch_backend('Agg') 
 plt.rcParams['mathtext.fontset'] = 'cm' 
 RADIUS_M = 0.016 
-VERSION = "2.9.0_EMA_Tracking" 
+VERSION = "2.9.1_EMA_Stable" 
 MAX_DURATION = 10.0 
 MAX_ANALYSIS_WIDTH = 1280 
 
@@ -93,9 +93,9 @@ if uploaded_file:
             data_log = []; total_angle, prev_angle = 0.0, None 
             last_valid_gx, last_valid_gy = np.nan, np.nan 
             
-            # --- EMA (指数移動平均) 用パラメータ ---
-            last_bx, last_by = np.nan, np.nan
-            ALPHA = 0.7  # 最新値の重み。0.1〜0.9で調整。高いほどラグが減り、低いほど滑らか。
+            # --- スムージング用変数 ---
+            ema_bx, ema_by = np.nan, np.nan
+            ALPHA = 0.7 
 
             L_G = (np.array([40, 50, 50]), np.array([90, 255, 255]))
             L_P_loose = (np.array([140, 25, 60]), np.array([180, 255, 255]))
@@ -107,12 +107,9 @@ if uploaded_file:
                 if not ret: break 
                  
                 frame = cv2.resize(frame_raw, (w, h)) if scale_factor < 1.0 else frame_raw 
-                
-                # ノイズ低減のための軽いぼかし
                 blurred = cv2.GaussianBlur(frame, (5, 5), 0)
                 hsv = cv2.cvtColor(blurred, cv2.COLOR_BGR2HSV) 
 
-                # 1. 中心（緑）の検出
                 mask_g = cv2.inRange(hsv, L_G[0], L_G[1])
                 con_g, _ = cv2.findContours(mask_g, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE) 
                 gx, gy = np.nan, np.nan 
@@ -127,7 +124,6 @@ if uploaded_file:
                         gx, gy = last_valid_gx, last_valid_gy 
                 if not np.isnan(gx): last_valid_gx, last_valid_gy = gx, gy
 
-                # 2. ピンク（回転点）の検出 + EMAフィルタリング
                 bx, by = np.nan, np.nan 
                 if not np.isnan(gx): 
                     roi_mask = np.zeros((h, w), dtype=np.uint8)
@@ -145,26 +141,17 @@ if uploaded_file:
                             raw_bx = Mp["m10"]/Mp["m00"]
                             raw_by = Mp["m01"]/Mp["m00"]
                             
-                            # A. 異常ジャンプ（ノイズ）の抑制
-                            if not np.isnan(last_bx):
-                                dist = np.sqrt((raw_bx - last_bx)**2 + (raw_by - last_by)**2)
-                                if dist > 60: # 前のフレームから60px以上飛んだらノイズと見なす
-                                    raw_bx, raw_by = last_bx, last_by
-
-                            # B. EMA (指数移動平均) ロジック
-                            if np.isnan(last_bx):
-                                bx, by = raw_bx, raw_by
+                            if np.isnan(ema_bx):
+                                ema_bx, ema_by = raw_bx, raw_by
                             else:
-                                bx = ALPHA * raw_bx + (1 - ALPHA) * last_bx
-                                by = ALPHA * raw_by + (1 - ALPHA) * last_by
+                                # 急激なジャンプ抑制
+                                dist = np.sqrt((raw_bx - ema_bx)**2 + (raw_by - ema_by)**2)
+                                if dist < 100: # 100px以内なら更新
+                                    ema_bx = ALPHA * raw_bx + (1 - ALPHA) * ema_bx
+                                    ema_by = ALPHA * raw_by + (1 - ALPHA) * ema_by
                             
-                            last_bx, last_by = bx, by
-                        else:
-                            last_bx, last_by = np.nan, np.nan # 面積不足ならリセット
-                    else:
-                        last_bx, last_by = np.nan, np.nan
+                            bx, by = ema_bx, ema_by
 
-                # 3. 角度計算
                 if not np.isnan(gx) and not np.isnan(bx): 
                     curr_a = np.arctan2(by - gy, bx - gx) 
                     if prev_angle is not None: 
@@ -189,7 +176,6 @@ if uploaded_file:
             st.session_state.video_meta = {"fps": fps, "raw_fps": raw_fps, "w": w, "h": h, "path": tfile_temp.name, "scale": scale_factor} 
             st.session_state.file_id = uploaded_file.name 
 
-    # --- UI & Graph Rendering ---
     df = st.session_state.df 
     st.sidebar.markdown("---") 
     t_max_limit = float(df["t"].max()) 
@@ -271,6 +257,8 @@ if uploaded_file:
                 cv2.putText(canvas, val_text, (idx*v_size + 10, v_size + 40), font, 0.4, (255,255,255), 1, cv2.LINE_AA) 
              
             if not np.isnan(curr['gx']): 
+                # 解析円（探索範囲）の描画を追加
+                cv2.circle(frame, (int(curr['gx']), int(curr['gy'])), search_range, (255,255,0), 1)
                 cv2.circle(frame, (int(curr['gx']), int(curr['gy'])), 5, (0,255,0), -1) 
                 if not np.isnan(curr['bx']): 
                     cv2.circle(frame, (int(curr['bx']), int(curr['by'])), 5, (255,0,255), -1) 
