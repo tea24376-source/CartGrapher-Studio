@@ -12,7 +12,7 @@ import os
 plt.switch_backend('Agg') 
 plt.rcParams['mathtext.fontset'] = 'cm' 
 RADIUS_M = 0.016 
-VERSION = "2.9.1_EMA_Stable" 
+VERSION = "2.9.2_Fast_Response" 
 MAX_DURATION = 10.0 
 MAX_ANALYSIS_WIDTH = 1280 
 
@@ -75,7 +75,7 @@ if uploaded_file:
     tfile_temp.close() 
 
     if "df" not in st.session_state or st.session_state.get("file_id") != uploaded_file.name: 
-        with st.spinner("EMAトラッキングエンジンで解析中..."): 
+        with st.spinner("高速・高感度トラッキング中..."): 
             cap = cv2.VideoCapture(tfile_temp.name) 
             raw_fps = cap.get(cv2.CAP_PROP_FPS) or 30 
             fps = raw_fps * 4  
@@ -93,9 +93,9 @@ if uploaded_file:
             data_log = []; total_angle, prev_angle = 0.0, None 
             last_valid_gx, last_valid_gy = np.nan, np.nan 
             
-            # --- スムージング用変数 ---
+            # --- パラメータ調整 ---
             ema_bx, ema_by = np.nan, np.nan
-            ALPHA = 0.7 
+            ALPHA = 0.9 # レスポンスを上げるために0.9に変更（ほぼ生データに近いがチラつきだけ消す）
 
             L_G = (np.array([40, 50, 50]), np.array([90, 255, 255]))
             L_P_loose = (np.array([140, 25, 60]), np.array([180, 255, 255]))
@@ -107,7 +107,8 @@ if uploaded_file:
                 if not ret: break 
                  
                 frame = cv2.resize(frame_raw, (w, h)) if scale_factor < 1.0 else frame_raw 
-                blurred = cv2.GaussianBlur(frame, (5, 5), 0)
+                # ガウスぼかしを (3,3) に縮小してエッジのキレを維持
+                blurred = cv2.GaussianBlur(frame, (3, 3), 0)
                 hsv = cv2.cvtColor(blurred, cv2.COLOR_BGR2HSV) 
 
                 mask_g = cv2.inRange(hsv, L_G[0], L_G[1])
@@ -116,7 +117,7 @@ if uploaded_file:
                 if con_g: 
                     c = max(con_g, key=cv2.contourArea)
                     M = cv2.moments(c) 
-                    if M["m00"] > 40: 
+                    if M["m00"] > 30: 
                         gx, gy = M["m10"]/M["m00"], M["m01"]/M["m00"] 
                 
                 if not np.isnan(last_valid_gx) and not np.isnan(gx): 
@@ -137,20 +138,23 @@ if uploaded_file:
                     if con_p: 
                         cp = max(con_p, key=cv2.contourArea)
                         Mp = cv2.moments(cp) 
-                        if Mp["m00"] > 30: 
+                        if Mp["m00"] > 25: # 感度を上げるために閾値を下げる
                             raw_bx = Mp["m10"]/Mp["m00"]
                             raw_by = Mp["m01"]/Mp["m00"]
                             
                             if np.isnan(ema_bx):
                                 ema_bx, ema_by = raw_bx, raw_by
                             else:
-                                # 急激なジャンプ抑制
-                                dist = np.sqrt((raw_bx - ema_bx)**2 + (raw_by - ema_by)**2)
-                                if dist < 100: # 100px以内なら更新
-                                    ema_bx = ALPHA * raw_bx + (1 - ALPHA) * ema_bx
-                                    ema_by = ALPHA * raw_by + (1 - ALPHA) * ema_by
+                                # ジャンプ制限を撤廃し、ALPHAで追従させる
+                                ema_bx = ALPHA * raw_bx + (1 - ALPHA) * ema_bx
+                                ema_by = ALPHA * raw_by + (1 - ALPHA) * ema_by
                             
                             bx, by = ema_bx, ema_by
+                        else:
+                            # 見失った場合はEMAをリセット（取り残し防止）
+                            ema_bx, ema_by = np.nan, np.nan
+                    else:
+                        ema_bx, ema_by = np.nan, np.nan
 
                 if not np.isnan(gx) and not np.isnan(bx): 
                     curr_a = np.arctan2(by - gy, bx - gx) 
@@ -176,6 +180,7 @@ if uploaded_file:
             st.session_state.video_meta = {"fps": fps, "raw_fps": raw_fps, "w": w, "h": h, "path": tfile_temp.name, "scale": scale_factor} 
             st.session_state.file_id = uploaded_file.name 
 
+    # --- UI & 表示ロジック ---
     df = st.session_state.df 
     st.sidebar.markdown("---") 
     t_max_limit = float(df["t"].max()) 
@@ -230,13 +235,6 @@ if uploaded_file:
         header_h = v_size + 100 
         font = cv2.FONT_HERSHEY_SIMPLEX 
         
-        graph_configs = [ 
-            {"xc": "t", "yc": "x", "xl": "t", "yl": "x", "xu": "s", "yu": "m", "col": "blue", "ymn": 0.0, "ymx": x_m, "xm": t_m}, 
-            {"xc": "t", "yc": "v", "xl": "t", "yl": "v", "xu": "s", "yu": "m/s", "col": "red", "ymn": v_mi, "ymx": v_ma, "xm": t_m}, 
-            {"xc": "t", "yc": "a", "xl": "t", "yl": "a", "xu": "s", "yu": "m/s²", "yu_cv": "m/s^2", "col": "green", "ymn": a_mi, "ymx": a_ma, "xm": t_m}, 
-            {"xc": "x", "yc": "F", "xl": "x", "yl": "F", "xu": "m", "yu": "N", "col": "purple", "ymn": f_mi, "ymx": f_ma, "xm": x_m} 
-        ] 
-
         fourcc = cv2.VideoWriter_fourcc(*'mp4v') 
         out = cv2.VideoWriter(final_path, fourcc, meta["raw_fps"], (meta["w"], meta["h"] + header_h)) 
         cap = cv2.VideoCapture(meta["path"]) 
@@ -248,16 +246,9 @@ if uploaded_file:
             frame = cv2.resize(frame_raw, (meta["w"], meta["h"])) if meta.get("scale", 1.0) < 1.0 else frame_raw 
             canvas = np.zeros((meta["h"] + header_h, meta["w"], 3), dtype=np.uint8) 
             curr = df.iloc[i] 
-            df_s = df.iloc[:i+1] 
-             
-            for idx, g in enumerate(graph_configs): 
-                g_img = create_graph_image(df_s, g["xc"], g["yc"], g["xl"], g["yl"], g["xu"], g["yu"], g["col"], v_size, g["xm"], g["ymn"], g["ymx"]) 
-                canvas[0:v_size, idx*v_size:(idx+1)*v_size] = g_img 
-                val_text = f"{g['yl']}={curr[g['yc']]:>+7.3f}" 
-                cv2.putText(canvas, val_text, (idx*v_size + 10, v_size + 40), font, 0.4, (255,255,255), 1, cv2.LINE_AA) 
-             
+            
+            # 動画内描画
             if not np.isnan(curr['gx']): 
-                # 解析円（探索範囲）の描画を追加
                 cv2.circle(frame, (int(curr['gx']), int(curr['gy'])), search_range, (255,255,0), 1)
                 cv2.circle(frame, (int(curr['gx']), int(curr['gy'])), 5, (0,255,0), -1) 
                 if not np.isnan(curr['bx']): 
