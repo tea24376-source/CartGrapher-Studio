@@ -94,7 +94,7 @@ if uploaded_file:
             
             # --- 座標スムージング用のバッファ ---
             bx_buffer, by_buffer = [], []
-            SMOOTH_WINDOW = 3 # 3フレームの平均をとる
+            SMOOTH_WINDOW = 2 # 3フレームの平均をとる
 
             L_G = (np.array([40, 50, 50]), np.array([90, 255, 255]))
             L_P_loose = (np.array([140, 25, 60]), np.array([180, 255, 255]))
