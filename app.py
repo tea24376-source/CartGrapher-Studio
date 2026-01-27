@@ -62,7 +62,7 @@ def create_graph_image(df_sub, x_col, y_col, x_label, y_label, x_unit, y_unit, c
     return cv2.resize(img, (size, size)) if img is not None else np.zeros((size, size, 3), dtype=np.uint8) 
 
 st.set_page_config(page_title=f"CartGrapher Studio v{VERSION}", layout="wide") 
-st.title(f"🚗CartGrapher Studio ver {VERSION}") 
+st.title(f"🚗 CartGrapher Studio ver {VERSION}") 
 
 st.sidebar.header("解析設定") 
 mass_input = st.sidebar.number_input("台車の質量 $m$ [kg]", value=0.100, min_value=0.001, format="%.3f", step=0.001) 
