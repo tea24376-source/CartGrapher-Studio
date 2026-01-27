@@ -103,7 +103,7 @@ if uploaded_file:
                     M = cv2.moments(c) 
                     if M["m00"] > 40: 
                         gx, gy = M["m10"]/M["m00"], M["m01"]/M["m00"] 
-                        current_search_range = int(np.sqrt(cv2.contourArea(c) / np.pi) * 5.5)
+                        current_search_range = int(np.sqrt(cv2.contourArea(c) / np.pi) * 5)
                 if not np.isnan(last_valid_gx) and not np.isnan(gx): 
                     if np.sqrt((gx - last_valid_gx)**2 + (gy - last_valid_gy)**2) > 50: gx, gy = last_valid_gx, last_valid_gy 
                 if not np.isnan(gx): last_valid_gx, last_valid_gy = gx, gy
